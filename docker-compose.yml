@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  rrweb-converter:
+    build: .
+    ports:
+      - "3001:3001"
+    volumes:
+      - jobs-data:/app/jobs
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+    restart: unless-stopped
+
+volumes:
+  jobs-data:

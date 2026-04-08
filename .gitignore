@@ -1,0 +1,7 @@
+node_modules/
+jobs/
+*.mp4
+*.webm
+frontend/dist/
+.env
+*.db
