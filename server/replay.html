@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=__WIDTH__, initial-scale=1.0" />
+  <title>rrweb Replay</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      width: __WIDTH__px;
+      height: __HEIGHT__px;
+      overflow: hidden;
+      background: #fff;
+    }
+    #player-container {
+      width: __WIDTH__px;
+      height: __HEIGHT__px;
+      position: relative;
+    }
+    /* Hide the rrweb-player controller bar */
+    .rr-controller {
+      display: none !important;
+    }
+    /* Make the player fill the container */
+    .rr-player {
+      width: __WIDTH__px !important;
+      height: __HEIGHT__px !important;
+    }
+    .rr-player__frame {
+      width: __WIDTH__px !important;
+      height: __HEIGHT__px !important;
+    }
+    .replay-done {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="player-container"></div>
+  <div id="done-marker"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js"></script>
+  <script>
+    (function () {
+      const events = __EVENTS_PLACEHOLDER__;
+      const speed = __SPEED__;
+
+      const player = new rrwebPlayer({
+        target: document.getElementById("player-container"),
+        props: {
+          events: events,
+          width: __WIDTH__,
+          height: __HEIGHT__,
+          showController: false,
+          autoPlay: true,
+          speed: speed,
+          skipInactive: true,
+          mouseTail: true,
+        },
+      });
+
+      // Listen for replay finish
+      player.addEventListener("finish", function () {
+        // Signal that replay is done
+        const marker = document.getElementById("done-marker");
+        marker.className = "replay-done";
+        marker.style.display = "block";
+        marker.textContent = "done";
+        console.log("Replay finished");
+      });
+    })();
+  </script>
+</body>
+</html>
