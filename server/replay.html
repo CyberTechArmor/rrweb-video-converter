@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=__WIDTH__, initial-scale=1.0" />
   <title>rrweb Replay</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css" />
   <style>
     * {
       margin: 0;
@@ -21,58 +20,92 @@
       width: __WIDTH__px;
       height: __HEIGHT__px;
       position: relative;
+      overflow: hidden;
     }
-    /* Hide the rrweb-player controller bar */
-    .rr-controller {
-      display: none !important;
-    }
-    /* Make the player fill the container */
-    .rr-player {
-      width: __WIDTH__px !important;
-      height: __HEIGHT__px !important;
-    }
-    .rr-player__frame {
-      width: __WIDTH__px !important;
-      height: __HEIGHT__px !important;
+    #player-container .replayer-wrapper {
+      transform-origin: top left;
     }
     .replay-done {
-      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
     }
+    /* __RRWEB_CSS__ */
   </style>
 </head>
 <body>
   <div id="player-container"></div>
   <div id="done-marker"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js"></script>
+  <script>
+    // __RRWEB_JS__
+  </script>
   <script>
     (function () {
       const events = __EVENTS_PLACEHOLDER__;
       const speed = __SPEED__;
+      const targetWidth = __WIDTH__;
+      const targetHeight = __HEIGHT__;
 
-      const player = new rrwebPlayer({
-        target: document.getElementById("player-container"),
-        props: {
-          events: events,
-          width: __WIDTH__,
-          height: __HEIGHT__,
-          showController: false,
-          autoPlay: true,
-          speed: speed,
-          skipInactive: true,
-          mouseTail: true,
-        },
-      });
+      window.__REPLAY_READY__ = false;
+      window.__REPLAY_DONE__ = false;
+      window.__REPLAY_ERROR__ = null;
 
-      // Listen for replay finish
-      player.addEventListener("finish", function () {
-        // Signal that replay is done
+      function setDoneMarker(text) {
         const marker = document.getElementById("done-marker");
         marker.className = "replay-done";
-        marker.style.display = "block";
-        marker.textContent = "done";
-        console.log("Replay finished");
-      });
+        marker.textContent = text;
+      }
+
+      try {
+        if (typeof rrweb === "undefined" || !rrweb.Replayer) {
+          throw new Error("rrweb library did not load");
+        }
+
+        const replayer = new rrweb.Replayer(events, {
+          root: document.getElementById("player-container"),
+          speed: speed,
+          skipInactive: false,
+          showWarning: false,
+          showDebug: false,
+          mouseTail: {
+            duration: 500,
+            lineCap: "round",
+            lineWidth: 3,
+            strokeStyle: "red",
+          },
+          UNSAFE_replayCanvas: true,
+        });
+
+        // Scale the replay content to fill the target viewport
+        // Meta gives us the original recorded resolution
+        try {
+          const meta = replayer.getMetaData();
+          const origWidth = meta.totalTime ? (replayer.iframe && replayer.iframe.offsetWidth) : 0;
+          // Leave default scaling; rrweb sizes the iframe to the recorded document
+        } catch (e) {
+          // ignore
+        }
+
+        replayer.on("finish", function () {
+          window.__REPLAY_DONE__ = true;
+          setDoneMarker("done");
+          console.log("Replay finished");
+        });
+
+        // Start playback
+        replayer.play(0);
+        window.__REPLAY_READY__ = true;
+        console.log("Replayer initialized, playing " + events.length + " events at " + speed + "x");
+      } catch (err) {
+        console.error("rrweb init failed:", err);
+        window.__REPLAY_ERROR__ = err.message || String(err);
+        setDoneMarker("error");
+      }
     })();
   </script>
 </body>
