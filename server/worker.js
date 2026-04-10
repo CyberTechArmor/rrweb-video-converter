@@ -457,6 +457,20 @@ async function processJob(job) {
       throw new Error("No frames were captured during replay");
     }
 
+    // Target video duration = original replay duration / speed.
+    // The input framerate we pass to ffmpeg must be frames/targetDuration
+    // so ffmpeg times each frame correctly. Using the user's chosen fps
+    // here would be a bug: CDP screencast captures at ~30+ fps when the
+    // page is active, so we'd end up with many more frames than
+    // user_fps × duration, making the output video several times too long.
+    const targetDurationSec = Math.max(expectedDurationMs / 1000, 0.5);
+    const inputFps = frames.length / targetDurationSec;
+    console.log(
+      `${logPrefix} Timing: ${frames.length} frames over ~${targetDurationSec.toFixed(
+        2
+      )}s → input ${inputFps.toFixed(2)} fps, output ${job.fps} fps`
+    );
+
     // 7. Write frames as PNGs for ffmpeg input, reporting progress 75→84
     fs.mkdirSync(framesDir, { recursive: true });
     const totalFrames = frames.length;
@@ -484,11 +498,14 @@ async function processJob(job) {
     await new Promise((resolve, reject) => {
       const cmd = ffmpeg()
         .input(path.join(framesDir, "frame_%06d.png"))
-        .inputFPS(job.fps)
+        .inputFPS(inputFps)
         .videoCodec("libx264")
         .outputOptions([
           "-pix_fmt yuv420p",
           `-s ${job.width}x${job.height}`,
+          // Output framerate — ffmpeg will duplicate/drop frames as
+          // needed to match this while preserving the input timing
+          `-r ${job.fps}`,
           // Use ultrafast preset at 1080p for speed; fast at lower res
           `-preset ${job.height >= 1080 ? "ultrafast" : "fast"}`,
           "-crf 23",
