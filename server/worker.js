@@ -565,8 +565,15 @@ async function processJob(job) {
       "-pix_fmt", "yuv420p",
       "-s", `${job.width}x${job.height}`,
       "-r", String(job.fps),
-      "-preset", "ultrafast",
-      "-crf", "23",
+      // veryfast strikes a good balance between encode speed and
+      // file size for UI recordings. ultrafast is ~2x faster but
+      // produces 3-5x larger files because it disables CABAC and
+      // several other size-saving tricks. veryfast keeps CABAC,
+      // which is the single biggest lever on file size.
+      "-preset", "veryfast",
+      // CRF 25 is visually indistinguishable from 23 on UI text
+      // and shaves ~30% off the file size.
+      "-crf", "25",
       "-movflags", "+faststart",
       "-threads", "0",
       outputPath,
