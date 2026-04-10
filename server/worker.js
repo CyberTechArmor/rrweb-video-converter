@@ -593,10 +593,48 @@ async function processJob(job) {
       "-crf", String(crf),
       "-movflags", "+faststart",
       "-threads", "0",
+      // Force ffmpeg to emit structured progress in key=value line
+      // form every 0.5s. Without this, ffmpeg's stderr is block-
+      // buffered (4KB) when stderr is a pipe, so we might see zero
+      // progress output for minutes with slow encoders like libx265.
+      "-progress", "pipe:2",
+      "-stats_period", "0.5",
       outputPath,
     ];
 
     console.log(`${logPrefix} ffmpeg ${ffmpegArgs.join(" ")}`);
+
+    // Progress bookkeeping — used by both the stderr parser and the
+    // wall-clock fallback so only the higher value ever wins.
+    let currentPct = 85;
+    const tickProgress = (pct) => {
+      const clamped = Math.min(Math.max(pct, 85), 94);
+      if (clamped > currentPct) {
+        currentPct = clamped;
+        try {
+          updateJobStatus.run("processing", clamped, job.id);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    // Wall-clock progress fallback. Even if ffmpeg emits zero stderr
+    // for the entire encode (libx265 analysis phase, pipe buffering,
+    // whatever), the bar still crawls from 85 toward 94 at a rate
+    // proportional to a rough estimate of total encode time.
+    //   H.264:  ~1.5x realtime duration
+    //   H.265:  ~4x realtime duration (much slower encode)
+    const encodeMultiplier = codec === "h265" ? 4 : 1.5;
+    const estimatedEncodeMs = Math.max(
+      targetDurationSec * 1000 * encodeMultiplier,
+      15000
+    );
+    const wallClockInterval = setInterval(() => {
+      const elapsed = Date.now() - encodeStart;
+      const frac = Math.min(elapsed / estimatedEncodeMs, 0.95);
+      tickProgress(85 + Math.floor(frac * 9));
+    }, 1000);
 
     await new Promise((resolve, reject) => {
       const proc = spawn("ffmpeg", ffmpegArgs, {
@@ -607,6 +645,20 @@ async function processJob(job) {
       let stderrBuf = "";
       let lastDoneFrames = 0;
 
+      // Heartbeat log so the worker output shows ffmpeg is alive
+      // even if nothing else has printed in a while.
+      const heartbeat = setInterval(() => {
+        const elapsed = Math.round((Date.now() - encodeStart) / 1000);
+        const tailPreview = stderrTail
+          .slice(-160)
+          .replace(/[\r\n]+/g, " | ");
+        console.log(
+          `${logPrefix} ffmpeg alive — ${elapsed}s elapsed, ${lastDoneFrames}/${totalFrames} frames${
+            tailPreview ? `, stderr tail: ${tailPreview}` : ""
+          }`
+        );
+      }, 5000);
+
       proc.stderr.on("data", (chunk) => {
         const text = chunk.toString();
         stderrBuf += text;
@@ -614,26 +666,20 @@ async function processJob(job) {
         stderrTail = (stderrTail + text).slice(-4000);
 
         // ffmpeg progress lines end with \r; split on both \r and \n.
+        // -progress output is newline-delimited key=value lines.
         const parts = stderrBuf.split(/[\r\n]/);
         stderrBuf = parts.pop() || "";
         for (const line of parts) {
           if (!line.trim()) continue;
-          const fm = /frame=\s*(\d+)/.exec(line);
+          // Traditional 'frame= 123' and -progress 'frame=123' both match
+          const fm = /^frame=\s*(\d+)|\bframe=\s*(\d+)/.exec(line);
           if (fm) {
-            const doneFrames = parseInt(fm[1], 10);
+            const doneFrames = parseInt(fm[1] || fm[2], 10);
             if (doneFrames > lastDoneFrames) {
               lastDoneFrames = doneFrames;
               const pct =
                 85 + Math.floor((doneFrames / totalFrames) * 9);
-              try {
-                updateJobStatus.run(
-                  "processing",
-                  Math.min(pct, 94),
-                  job.id
-                );
-              } catch {
-                // ignore
-              }
+              tickProgress(pct);
               if (doneFrames % 30 === 0 || doneFrames === totalFrames) {
                 console.log(
                   `${logPrefix} ffmpeg: ${doneFrames}/${totalFrames} frames`
@@ -649,12 +695,14 @@ async function processJob(job) {
       });
 
       proc.on("error", (err) => {
+        clearInterval(wallClockInterval);
+        clearInterval(heartbeat);
         console.error(`${logPrefix} ffmpeg spawn error:`, err.message);
         reject(err);
       });
 
       // Hard timeout so a hung ffmpeg can't stall the worker forever
-      const timeoutMs = 10 * 60 * 1000; // 10 minutes
+      const timeoutMs = 15 * 60 * 1000; // 15 minutes (h265 can be slow)
       const timeout = setTimeout(() => {
         console.error(
           `${logPrefix} ffmpeg timeout (${timeoutMs / 1000}s), killing process`
@@ -668,9 +716,13 @@ async function processJob(job) {
 
       proc.on("close", (code, signal) => {
         clearTimeout(timeout);
+        clearInterval(wallClockInterval);
+        clearInterval(heartbeat);
         const elapsed = Math.round((Date.now() - encodeStart) / 1000);
         if (code === 0) {
-          console.log(`${logPrefix} ffmpeg done in ${elapsed}s`);
+          console.log(
+            `${logPrefix} ffmpeg done in ${elapsed}s (${lastDoneFrames} frames)`
+          );
           resolve();
         } else {
           const err = new Error(
