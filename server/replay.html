@@ -110,6 +110,19 @@
           UNSAFE_replayCanvas: true,
         });
 
+        // Expose replayer + metadata for the worker to poll
+        window.__REPLAYER__ = replayer;
+        try {
+          var meta = replayer.getMetaData();
+          window.__REPLAY_TOTAL_MS__ =
+            (meta && meta.totalTime) ||
+            events[events.length - 1].timestamp - events[0].timestamp;
+        } catch (e) {
+          window.__REPLAY_TOTAL_MS__ =
+            events[events.length - 1].timestamp - events[0].timestamp;
+        }
+        log("replay total ms: " + window.__REPLAY_TOTAL_MS__);
+
         replayer.on("finish", function () {
           log("replay finish event");
           window.__REPLAY_DONE__ = true;
@@ -117,6 +130,40 @@
         });
 
         replayer.play(0);
+
+        // Fallback: rrweb's finish event occasionally misses. Poll
+        // getCurrentTime() and flip __REPLAY_DONE__ ourselves once
+        // we've reached the end.
+        var pollStart = Date.now();
+        var fallbackInterval = setInterval(function () {
+          try {
+            if (window.__REPLAY_DONE__) {
+              clearInterval(fallbackInterval);
+              return;
+            }
+            var cur =
+              typeof replayer.getCurrentTime === "function"
+                ? replayer.getCurrentTime()
+                : 0;
+            window.__REPLAY_CURRENT_MS__ = cur;
+            // Add a grace period of 500ms past the end
+            if (cur >= window.__REPLAY_TOTAL_MS__ + 500) {
+              log(
+                "fallback: reached end of replay (" +
+                  cur +
+                  "/" +
+                  window.__REPLAY_TOTAL_MS__ +
+                  ")"
+              );
+              window.__REPLAY_DONE__ = true;
+              setDoneMarker("done");
+              clearInterval(fallbackInterval);
+            }
+          } catch (e) {
+            log("fallback poll error: " + (e && e.message));
+          }
+        }, 200);
+
         window.__REPLAY_READY__ = true;
         log("replayer ready and playing");
       } catch (err) {

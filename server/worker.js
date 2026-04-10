@@ -260,10 +260,48 @@ async function processJob(job) {
 
     updateJobStatus.run("processing", 30, job.id);
 
-    // 4. Inject events via CDP (not through HTML string substitution) so
-    //    event content can't break HTML/JS parsing. evaluateOnNewDocument
-    //    runs before any page script, so the init script will see the
-    //    globals by the time it executes.
+    // 4a. Force the page to look "visible" so requestAnimationFrame
+    //     isn't throttled to 1Hz in headless mode (rrweb's Replayer
+    //     uses rAF internally to drive playback).
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      Object.defineProperty(document, "webkitHidden", {
+        configurable: true,
+        get: () => false,
+      });
+      Object.defineProperty(document, "webkitVisibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+    });
+
+    // Tell Chromium to emulate a focused, visible page. Belt-and-
+    // suspenders alongside the property overrides above.
+    try {
+      const tmpClient = await page.target().createCDPSession();
+      await tmpClient.send("Emulation.setFocusEmulationEnabled", {
+        enabled: true,
+      });
+      await tmpClient.detach();
+    } catch (e) {
+      console.warn(
+        `${logPrefix} setFocusEmulationEnabled unavailable: ${e.message}`
+      );
+    }
+
+    updateJobStatus.run("processing", 32, job.id);
+
+    // 4b. Inject events via CDP (not through HTML string substitution) so
+    //     event content can't break HTML/JS parsing. evaluateOnNewDocument
+    //     runs before any page script, so the init script will see the
+    //     globals by the time it executes.
     console.log(`${logPrefix} Injecting events into page context...`);
     await page.evaluateOnNewDocument(
       (eventsArg, speedArg) => {
@@ -328,6 +366,9 @@ async function processJob(job) {
     client.on("Page.screencastFrame", async (frame) => {
       frames.push(Buffer.from(frame.data, "base64"));
       frameCounter++;
+      if (frameCounter === 1 || frameCounter % 30 === 0) {
+        console.log(`${logPrefix} captured ${frameCounter} frames`);
+      }
       try {
         await client.send("Page.screencastFrameAck", {
           sessionId: frame.sessionId,
@@ -344,6 +385,7 @@ async function processJob(job) {
       maxHeight: job.height,
       everyNthFrame: 1,
     });
+    console.log(`${logPrefix} Screencast started`);
 
     updateJobStatus.run("processing", 50, job.id);
 
@@ -363,14 +405,28 @@ async function processJob(job) {
       )}s, waiting up to ${Math.round(waitTimeout / 1000)}s`
     );
 
-    // Periodic progress updates during capture
+    // Periodic progress updates during capture. Prefer the replayer's
+    // reported current time (so the bar reflects actual playback
+    // progress); fall back to wall-clock elapsed if the page eval fails.
     const captureStart = Date.now();
-    const progressTimer = setInterval(() => {
-      const elapsed = Date.now() - captureStart;
-      const pct = Math.min(
-        50 + Math.floor((elapsed / expectedDurationMs) * 25),
-        74
-      );
+    const progressTimer = setInterval(async () => {
+      let pct;
+      try {
+        const state = await page.evaluate(() => ({
+          cur: window.__REPLAY_CURRENT_MS__ || 0,
+          total: window.__REPLAY_TOTAL_MS__ || 0,
+          done: window.__REPLAY_DONE__ === true,
+        }));
+        const total = state.total || expectedDurationMs;
+        const frac = total > 0 ? Math.min(state.cur / total, 1) : 0;
+        pct = Math.min(50 + Math.floor(frac * 24), 74);
+      } catch {
+        const elapsed = Date.now() - captureStart;
+        pct = Math.min(
+          50 + Math.floor((elapsed / expectedDurationMs) * 24),
+          74
+        );
+      }
       try {
         updateJobStatus.run("processing", pct, job.id);
       } catch {
