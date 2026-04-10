@@ -106,34 +106,24 @@ function resolveRrwebAssetPaths() {
   return { jsPath, cssPath };
 }
 
-// At startup: copy rrweb assets to jobs/.assets/ so they have a stable
-// path that we can reference via file:// URL from each job's replay.html.
-const ASSETS_DIR = path.join(JOBS_DIR, ".assets");
-let RRWEB_JS_URL = "";
-let RRWEB_CSS_URL = "";
+// At startup: read rrweb assets into memory. We'll inline them into
+// the replay HTML rather than referencing via file:// URLs, which
+// Chromium treats as cross-origin even with --allow-file-access-from-files
+// in headless mode.
+let RRWEB_JS_CONTENT = "";
+let RRWEB_CSS_CONTENT = "";
 let RRWEB_AVAILABLE = false;
 
 try {
-  fs.mkdirSync(ASSETS_DIR, { recursive: true });
   const { jsPath, cssPath } = resolveRrwebAssetPaths();
-
-  const sharedJs = path.join(ASSETS_DIR, "rrweb.js");
-  fs.copyFileSync(jsPath, sharedJs);
-  RRWEB_JS_URL = "file://" + sharedJs;
-  console.log(`rrweb JS:  ${jsPath} → ${sharedJs}`);
-
+  RRWEB_JS_CONTENT = fs.readFileSync(jsPath, "utf-8");
+  console.log(`rrweb JS:  ${jsPath} (${RRWEB_JS_CONTENT.length} bytes)`);
   if (cssPath) {
-    const sharedCss = path.join(ASSETS_DIR, "rrweb.css");
-    fs.copyFileSync(cssPath, sharedCss);
-    RRWEB_CSS_URL = "file://" + sharedCss;
-    console.log(`rrweb CSS: ${cssPath} → ${sharedCss}`);
+    RRWEB_CSS_CONTENT = fs.readFileSync(cssPath, "utf-8");
+    console.log(`rrweb CSS: ${cssPath} (${RRWEB_CSS_CONTENT.length} bytes)`);
   } else {
-    // Create an empty file so the <link> tag doesn't 404
-    const sharedCss = path.join(ASSETS_DIR, "rrweb.css");
-    fs.writeFileSync(sharedCss, "/* no rrweb css found */");
-    RRWEB_CSS_URL = "file://" + sharedCss;
+    console.log(`rrweb CSS: (none found)`);
   }
-
   RRWEB_AVAILABLE = true;
 } catch (err) {
   console.error("[worker] Failed to prepare rrweb assets:", err.message);
@@ -144,28 +134,22 @@ const REPLAY_HTML_TEMPLATE = fs.readFileSync(REPLAY_HTML_PATH, "utf-8");
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// Serialize JS object for safe inlining inside a <script> tag.
-// Escapes sequences that could break out of the script context or
-// trip up the HTML parser: </script>, <!--, U+2028/U+2029.
-function htmlSafeJson(obj) {
-  return JSON.stringify(obj)
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/&/g, "\\u0026")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+// Prevent premature </script>/</style> from terminating the enclosing
+// tag when JS/CSS content is inlined into HTML.
+function escapeForHtmlEmbed(content) {
+  return content
+    .replace(/<\/script/gi, "<\\/script")
+    .replace(/<\/style/gi, "<\\/style");
 }
 
-function buildReplayHtml(events, job) {
+function buildReplayHtml(job) {
   // Use function form of .replace so '$' sequences in the replacement
   // values aren't interpreted as back-references.
   return REPLAY_HTML_TEMPLATE
-    .replace("__RRWEB_CSS_URL__", () => RRWEB_CSS_URL)
-    .replace("__RRWEB_JS_URL__", () => RRWEB_JS_URL)
-    .replace("__EVENTS_PLACEHOLDER__", () => htmlSafeJson(events))
+    .replace("/* __RRWEB_CSS__ */", () => escapeForHtmlEmbed(RRWEB_CSS_CONTENT))
+    .replace("/* __RRWEB_JS__ */", () => escapeForHtmlEmbed(RRWEB_JS_CONTENT))
     .replace(/__WIDTH__/g, String(job.width))
-    .replace(/__HEIGHT__/g, String(job.height))
-    .replace("__SPEED__", String(job.speed));
+    .replace(/__HEIGHT__/g, String(job.height));
 }
 
 function parseEventsJson(raw) {
@@ -214,8 +198,10 @@ async function processJob(job) {
 
     // 2. Build the replay HTML with rrweb inlined
     console.log(`${logPrefix} Building replay HTML...`);
-    const html = buildReplayHtml(events, job);
+    const html = buildReplayHtml(job);
+    // Write to disk for post-mortem debugging
     fs.writeFileSync(tempHtmlPath, html);
+    console.log(`${logPrefix} HTML size: ${html.length} bytes`);
     updateJobStatus.run("processing", 15, job.id);
 
     // 3. Launch Chromium
@@ -260,14 +246,75 @@ async function processJob(job) {
       console.log(`${logPrefix} [page] ${msg.type()}: ${msg.text()}`);
     });
     page.on("pageerror", (err) => {
-      console.error(`${logPrefix} [page error] ${err.message}`);
+      console.error(
+        `${logPrefix} [page error] ${err.message}${
+          err.stack ? "\n" + err.stack : ""
+        }`
+      );
+    });
+    page.on("requestfailed", (req) => {
+      console.warn(
+        `${logPrefix} [request failed] ${req.url()} — ${req.failure()?.errorText}`
+      );
     });
 
     updateJobStatus.run("processing", 30, job.id);
 
-    // 4. Navigate — use domcontentloaded (not networkidle0) to avoid hanging
-    console.log(`${logPrefix} Loading replay page...`);
-    await page.goto(`file://${tempHtmlPath}`, {
+    // 4a. Force the page to look "visible" so requestAnimationFrame
+    //     isn't throttled to 1Hz in headless mode (rrweb's Replayer
+    //     uses rAF internally to drive playback).
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      Object.defineProperty(document, "webkitHidden", {
+        configurable: true,
+        get: () => false,
+      });
+      Object.defineProperty(document, "webkitVisibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+    });
+
+    // Tell Chromium to emulate a focused, visible page. Belt-and-
+    // suspenders alongside the property overrides above.
+    try {
+      const tmpClient = await page.target().createCDPSession();
+      await tmpClient.send("Emulation.setFocusEmulationEnabled", {
+        enabled: true,
+      });
+      await tmpClient.detach();
+    } catch (e) {
+      console.warn(
+        `${logPrefix} setFocusEmulationEnabled unavailable: ${e.message}`
+      );
+    }
+
+    updateJobStatus.run("processing", 32, job.id);
+
+    // 4b. Inject events via CDP (not through HTML string substitution) so
+    //     event content can't break HTML/JS parsing. evaluateOnNewDocument
+    //     runs before any page script, so the init script will see the
+    //     globals by the time it executes.
+    console.log(`${logPrefix} Injecting events into page context...`);
+    await page.evaluateOnNewDocument(
+      (eventsArg, speedArg) => {
+        window.__EVENTS_DATA__ = eventsArg;
+        window.__REPLAY_SPEED__ = speedArg;
+      },
+      events,
+      job.speed
+    );
+
+    // 5. Set content directly — avoids file:// origin issues completely
+    console.log(`${logPrefix} Setting replay HTML content...`);
+    await page.setContent(html, {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
@@ -319,6 +366,9 @@ async function processJob(job) {
     client.on("Page.screencastFrame", async (frame) => {
       frames.push(Buffer.from(frame.data, "base64"));
       frameCounter++;
+      if (frameCounter === 1 || frameCounter % 30 === 0) {
+        console.log(`${logPrefix} captured ${frameCounter} frames`);
+      }
       try {
         await client.send("Page.screencastFrameAck", {
           sessionId: frame.sessionId,
@@ -335,6 +385,7 @@ async function processJob(job) {
       maxHeight: job.height,
       everyNthFrame: 1,
     });
+    console.log(`${logPrefix} Screencast started`);
 
     updateJobStatus.run("processing", 50, job.id);
 
@@ -354,14 +405,28 @@ async function processJob(job) {
       )}s, waiting up to ${Math.round(waitTimeout / 1000)}s`
     );
 
-    // Periodic progress updates during capture
+    // Periodic progress updates during capture. Prefer the replayer's
+    // reported current time (so the bar reflects actual playback
+    // progress); fall back to wall-clock elapsed if the page eval fails.
     const captureStart = Date.now();
-    const progressTimer = setInterval(() => {
-      const elapsed = Date.now() - captureStart;
-      const pct = Math.min(
-        50 + Math.floor((elapsed / expectedDurationMs) * 25),
-        74
-      );
+    const progressTimer = setInterval(async () => {
+      let pct;
+      try {
+        const state = await page.evaluate(() => ({
+          cur: window.__REPLAY_CURRENT_MS__ || 0,
+          total: window.__REPLAY_TOTAL_MS__ || 0,
+          done: window.__REPLAY_DONE__ === true,
+        }));
+        const total = state.total || expectedDurationMs;
+        const frac = total > 0 ? Math.min(state.cur / total, 1) : 0;
+        pct = Math.min(50 + Math.floor(frac * 24), 74);
+      } catch {
+        const elapsed = Date.now() - captureStart;
+        pct = Math.min(
+          50 + Math.floor((elapsed / expectedDurationMs) * 24),
+          74
+        );
+      }
       try {
         updateJobStatus.run("processing", pct, job.id);
       } catch {
