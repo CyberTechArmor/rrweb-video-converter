@@ -169,6 +169,39 @@ function buildReplayHtml(events, job) {
     .replace("__SPEED__", String(job.speed));
 }
 
+// Log memory usage so leaks show up in the worker log immediately
+function logMem(prefix, step) {
+  const m = process.memoryUsage();
+  console.log(
+    `${prefix} [mem:${step}] rss=${Math.round(
+      m.rss / 1024 / 1024
+    )}MB heap=${Math.round(m.heapUsed / 1024 / 1024)}MB external=${Math.round(
+      m.external / 1024 / 1024
+    )}MB`
+  );
+}
+
+// Await a promise but enforce a hard timeout. Used for browser close
+// and other cleanup operations that may hang in LXC containers under
+// memory pressure.
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
 function parseEventsJson(raw) {
   let parsed;
   try {
@@ -195,6 +228,7 @@ async function processJob(job) {
 
   const logPrefix = `[job ${job.id}]`;
   console.log(`${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x)`);
+  logMem(logPrefix, "start");
   updateJobStatus.run("processing", 5, job.id);
 
   if (!RRWEB_AVAILABLE) {
@@ -348,25 +382,43 @@ async function processJob(job) {
     //    ~10x less data through CDP, ~5x faster frame-write to disk,
     //    ~2x faster ffmpeg input decode. Visual loss is imperceptible
     //    after libx264 re-encodes anyway.
+    //
+    //    Frames are streamed directly to disk as they arrive instead
+    //    of being buffered in RAM. For a long 1080p capture the
+    //    in-memory buffer could easily exceed 300 MB, which tips over
+    //    constrained LXC containers on the second job of a session.
     console.log(`${logPrefix} Starting screencast...`);
     const client = await page.createCDPSession();
 
-    const frames = [];
-    let frameCounter = 0;
+    // Ensure the frames dir exists before we start receiving frames
+    fs.mkdirSync(framesDir, { recursive: true });
 
-    client.on("Page.screencastFrame", async (frame) => {
-      frames.push(Buffer.from(frame.data, "base64"));
-      frameCounter++;
-      if (frameCounter === 1 || frameCounter % 30 === 0) {
-        console.log(`${logPrefix} captured ${frameCounter} frames`);
-      }
+    let frameCounter = 0;
+    let frameWriteError = null;
+
+    client.on("Page.screencastFrame", (frame) => {
+      const idx = frameCounter++;
+      const framePath = path.join(
+        framesDir,
+        `frame_${String(idx).padStart(6, "0")}.jpg`
+      );
       try {
-        await client.send("Page.screencastFrameAck", {
-          sessionId: frame.sessionId,
-        });
-      } catch {
-        // session closed
+        fs.writeFileSync(framePath, Buffer.from(frame.data, "base64"));
+        if (idx === 0 || (idx + 1) % 30 === 0) {
+          console.log(`${logPrefix} captured ${idx + 1} frames`);
+        }
+      } catch (e) {
+        if (!frameWriteError) {
+          frameWriteError = e;
+          console.error(
+            `${logPrefix} frame write error (${framePath}): ${e.message}`
+          );
+        }
       }
+      // Ack asynchronously — if it throws, the session is gone, doesn't matter
+      client
+        .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+        .catch(() => {});
     });
 
     // Record wall-clock start before we begin capturing. We'll use
@@ -460,14 +512,22 @@ async function processJob(job) {
     const captureEnd = Date.now();
     const captureElapsedMs = captureEnd - captureStart;
 
+    if (frameWriteError) {
+      throw new Error(
+        `Frame write failed during capture: ${frameWriteError.message}`
+      );
+    }
+
+    const totalFrames = frameCounter;
     console.log(
-      `${logPrefix} Captured ${frames.length} frames over ${(
+      `${logPrefix} Captured ${totalFrames} frames over ${(
         captureElapsedMs / 1000
       ).toFixed(2)}s wall-clock (finished=${replayFinished})`
     );
-    updateJobStatus.run("processing", 75, job.id);
+    logMem(logPrefix, "post-capture");
+    updateJobStatus.run("processing", 85, job.id);
 
-    if (frames.length === 0) {
+    if (totalFrames === 0) {
       throw new Error("No frames were captured during replay");
     }
 
@@ -477,32 +537,15 @@ async function processJob(job) {
     //   - replay runs exactly in real time → wall-clock ≈ active duration
     //   - CDP captures at variable rate → N/elapsed is still correct
     const targetDurationSec = Math.max(captureElapsedMs / 1000, 0.5);
-    const inputFps = frames.length / targetDurationSec;
+    const inputFps = totalFrames / targetDurationSec;
     console.log(
-      `${logPrefix} Timing: ${frames.length} frames over ${targetDurationSec.toFixed(
+      `${logPrefix} Timing: ${totalFrames} frames over ${targetDurationSec.toFixed(
         2
       )}s wall-clock → input ${inputFps.toFixed(2)} fps, output ${job.fps} fps`
     );
 
-    // 7. Write frames as JPEGs for ffmpeg input, reporting progress 75→84
-    fs.mkdirSync(framesDir, { recursive: true });
-    const totalFrames = frames.length;
-    for (let i = 0; i < totalFrames; i++) {
-      fs.writeFileSync(
-        path.join(framesDir, `frame_${String(i).padStart(6, "0")}.jpg`),
-        frames[i]
-      );
-      if (i % 10 === 0 || i === totalFrames - 1) {
-        const pct = 75 + Math.floor((i / Math.max(totalFrames - 1, 1)) * 9);
-        try {
-          updateJobStatus.run("processing", Math.min(pct, 84), job.id);
-        } catch {
-          // ignore
-        }
-      }
-    }
-    console.log(`${logPrefix} Wrote ${totalFrames} frames to disk`);
-    updateJobStatus.run("processing", 85, job.id);
+    // 7. Frames are already on disk — streamed straight from the CDP
+    //    screencast handler. Nothing to do here except proceed to encode.
 
     // 8. Encode with ffmpeg via direct child_process.spawn.
     //    Using spawn directly (instead of fluent-ffmpeg) because:
@@ -641,13 +684,59 @@ async function processJob(job) {
       // ignore
     }
   } finally {
+    // ── Aggressive cleanup to prevent resource leaks across jobs ──
+    // In constrained LXC containers, a lingering Chromium process from
+    // the previous job will exhaust memory and cause the next job to
+    // hang. We explicitly detach the CDP session, close the page,
+    // close the browser with a timeout, and finally SIGKILL the
+    // underlying process if close() didn't return in time.
     if (browser) {
+      // 1. Detach CDP session if we still have one
+      // (client is scoped in the try block; we can't reference it
+      // here, but browser.close() will handle it via cascade.)
+
+      // 2. Try to close the browser cleanly, with a hard timeout
       try {
-        await browser.close();
+        await withTimeout(browser.close(), 5000, "browser.close");
+      } catch (e) {
+        console.warn(
+          `${logPrefix} browser.close failed/timed out: ${e.message}`
+        );
+      }
+
+      // 3. Force-kill the underlying Chrome process if it's still running
+      try {
+        const proc = browser.process();
+        if (proc && proc.pid && !proc.killed) {
+          console.warn(
+            `${logPrefix} browser process still alive, sending SIGKILL to pid ${proc.pid}`
+          );
+          try {
+            process.kill(proc.pid, "SIGKILL");
+          } catch (e) {
+            // ESRCH means process already gone — fine
+            if (e.code !== "ESRCH") {
+              console.warn(
+                `${logPrefix} SIGKILL failed: ${e.message}`
+              );
+            }
+          }
+        }
+      } catch {
+        // ignore — best-effort
+      }
+    }
+
+    // 4. Nudge GC if exposed (run node --expose-gc if desired)
+    if (global.gc) {
+      try {
+        global.gc();
       } catch {
         // ignore
       }
     }
+
+    logMem(logPrefix, "end-of-job");
   }
 }
 
