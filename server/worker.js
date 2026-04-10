@@ -344,7 +344,10 @@ async function processJob(job) {
 
     updateJobStatus.run("processing", 40, job.id);
 
-    // 5. Start CDP screencast
+    // 5. Start CDP screencast. Use JPEG (quality 80) instead of PNG:
+    //    ~10x less data through CDP, ~5x faster frame-write to disk,
+    //    ~2x faster ffmpeg input decode. Visual loss is imperceptible
+    //    after libx264 re-encodes anyway.
     console.log(`${logPrefix} Starting screencast...`);
     const client = await page.createCDPSession();
 
@@ -366,9 +369,15 @@ async function processJob(job) {
       }
     });
 
+    // Record wall-clock start before we begin capturing. We'll use
+    // the actual elapsed wall time to compute the ffmpeg input fps,
+    // which is self-correcting regardless of rrweb's skipInactive,
+    // rAF timing skew, or CDP frame rate variance.
+    const captureStart = Date.now();
+
     await client.send("Page.startScreencast", {
-      format: "png",
-      quality: 100,
+      format: "jpeg",
+      quality: 80,
       maxWidth: job.width,
       maxHeight: job.height,
       everyNthFrame: 1,
@@ -390,13 +399,14 @@ async function processJob(job) {
     console.log(
       `${logPrefix} Replay duration ~${Math.round(
         expectedDurationMs / 1000
-      )}s, waiting up to ${Math.round(waitTimeout / 1000)}s`
+      )}s (pre-skipInactive), waiting up to ${Math.round(
+        waitTimeout / 1000
+      )}s`
     );
 
     // Periodic progress updates during capture. Prefer the replayer's
     // reported current time (so the bar reflects actual playback
     // progress); fall back to wall-clock elapsed if the page eval fails.
-    const captureStart = Date.now();
     const progressTimer = setInterval(async () => {
       let pct;
       try {
@@ -439,17 +449,21 @@ async function processJob(job) {
     clearInterval(progressTimer);
 
     // Give a small buffer for trailing frames
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
 
-    // Stop screencast
+    // Stop screencast and record capture end time
     try {
       await client.send("Page.stopScreencast");
     } catch {
       // already stopped
     }
+    const captureEnd = Date.now();
+    const captureElapsedMs = captureEnd - captureStart;
 
     console.log(
-      `${logPrefix} Captured ${frames.length} frames (finished=${replayFinished})`
+      `${logPrefix} Captured ${frames.length} frames over ${(
+        captureElapsedMs / 1000
+      ).toFixed(2)}s wall-clock (finished=${replayFinished})`
     );
     updateJobStatus.run("processing", 75, job.id);
 
@@ -457,26 +471,25 @@ async function processJob(job) {
       throw new Error("No frames were captured during replay");
     }
 
-    // Target video duration = original replay duration / speed.
-    // The input framerate we pass to ffmpeg must be frames/targetDuration
-    // so ffmpeg times each frame correctly. Using the user's chosen fps
-    // here would be a bug: CDP screencast captures at ~30+ fps when the
-    // page is active, so we'd end up with many more frames than
-    // user_fps × duration, making the output video several times too long.
-    const targetDurationSec = Math.max(expectedDurationMs / 1000, 0.5);
+    // Compute ffmpeg input fps from actual wall-clock elapsed time
+    // rather than raw event timestamps. This is self-correcting:
+    //   - skipInactive jumps through idle periods → shorter wall-clock
+    //   - replay runs exactly in real time → wall-clock ≈ active duration
+    //   - CDP captures at variable rate → N/elapsed is still correct
+    const targetDurationSec = Math.max(captureElapsedMs / 1000, 0.5);
     const inputFps = frames.length / targetDurationSec;
     console.log(
-      `${logPrefix} Timing: ${frames.length} frames over ~${targetDurationSec.toFixed(
+      `${logPrefix} Timing: ${frames.length} frames over ${targetDurationSec.toFixed(
         2
-      )}s → input ${inputFps.toFixed(2)} fps, output ${job.fps} fps`
+      )}s wall-clock → input ${inputFps.toFixed(2)} fps, output ${job.fps} fps`
     );
 
-    // 7. Write frames as PNGs for ffmpeg input, reporting progress 75→84
+    // 7. Write frames as JPEGs for ffmpeg input, reporting progress 75→84
     fs.mkdirSync(framesDir, { recursive: true });
     const totalFrames = frames.length;
     for (let i = 0; i < totalFrames; i++) {
       fs.writeFileSync(
-        path.join(framesDir, `frame_${String(i).padStart(6, "0")}.png`),
+        path.join(framesDir, `frame_${String(i).padStart(6, "0")}.jpg`),
         frames[i]
       );
       if (i % 10 === 0 || i === totalFrames - 1) {
@@ -497,7 +510,7 @@ async function processJob(job) {
     const encodeStart = Date.now();
     await new Promise((resolve, reject) => {
       const cmd = ffmpeg()
-        .input(path.join(framesDir, "frame_%06d.png"))
+        .input(path.join(framesDir, "frame_%06d.jpg"))
         .inputFPS(inputFps)
         .videoCodec("libx264")
         .outputOptions([
@@ -506,10 +519,13 @@ async function processJob(job) {
           // Output framerate — ffmpeg will duplicate/drop frames as
           // needed to match this while preserving the input timing
           `-r ${job.fps}`,
-          // Use ultrafast preset at 1080p for speed; fast at lower res
-          `-preset ${job.height >= 1080 ? "ultrafast" : "fast"}`,
+          // ultrafast: ~3x faster than 'fast' at ~10% larger file size.
+          // For UI recordings this tradeoff is almost always worth it.
+          "-preset ultrafast",
           "-crf 23",
           "-movflags +faststart",
+          // Use all available cores
+          `-threads 0`,
         ])
         .output(outputPath)
         .on("start", (line) => console.log(`${logPrefix} ffmpeg: ${line}`))

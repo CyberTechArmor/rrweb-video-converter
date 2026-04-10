@@ -179,7 +179,10 @@
         var replayer = new rrweb.Replayer(events, {
           root: document.getElementById("player-container"),
           speed: speed,
-          skipInactive: false,
+          // Fast-forward through idle periods (>= 5s with no events).
+          // Most users record sessions with pauses and expect the
+          // output video to show the "interesting" parts, not dead air.
+          skipInactive: true,
           showWarning: false,
           showDebug: false,
           mouseTail: {
