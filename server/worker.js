@@ -457,36 +457,99 @@ async function processJob(job) {
       throw new Error("No frames were captured during replay");
     }
 
-    // 7. Write frames as PNGs for ffmpeg input
+    // 7. Write frames as PNGs for ffmpeg input, reporting progress 75→84
     fs.mkdirSync(framesDir, { recursive: true });
-    for (let i = 0; i < frames.length; i++) {
+    const totalFrames = frames.length;
+    for (let i = 0; i < totalFrames; i++) {
       fs.writeFileSync(
         path.join(framesDir, `frame_${String(i).padStart(6, "0")}.png`),
         frames[i]
       );
+      if (i % 10 === 0 || i === totalFrames - 1) {
+        const pct = 75 + Math.floor((i / Math.max(totalFrames - 1, 1)) * 9);
+        try {
+          updateJobStatus.run("processing", Math.min(pct, 84), job.id);
+        } catch {
+          // ignore
+        }
+      }
     }
-    console.log(`${logPrefix} Wrote ${frames.length} frames to disk`);
+    console.log(`${logPrefix} Wrote ${totalFrames} frames to disk`);
     updateJobStatus.run("processing", 85, job.id);
 
-    // 8. Encode with ffmpeg
-    console.log(`${logPrefix} Encoding with ffmpeg...`);
+    // 8. Encode with ffmpeg. Use 'progress' events to tick 85→94 during
+    //    encoding so the UI moves smoothly even on slow 1080p runs.
+    console.log(`${logPrefix} Encoding with ffmpeg (${totalFrames} frames)...`);
+    const encodeStart = Date.now();
     await new Promise((resolve, reject) => {
-      ffmpeg()
+      const cmd = ffmpeg()
         .input(path.join(framesDir, "frame_%06d.png"))
         .inputFPS(job.fps)
         .videoCodec("libx264")
         .outputOptions([
           "-pix_fmt yuv420p",
           `-s ${job.width}x${job.height}`,
-          "-preset fast",
+          // Use ultrafast preset at 1080p for speed; fast at lower res
+          `-preset ${job.height >= 1080 ? "ultrafast" : "fast"}`,
           "-crf 23",
           "-movflags +faststart",
         ])
         .output(outputPath)
-        .on("start", (cmd) => console.log(`${logPrefix} ffmpeg: ${cmd}`))
-        .on("end", resolve)
-        .on("error", reject)
-        .run();
+        .on("start", (line) => console.log(`${logPrefix} ffmpeg: ${line}`))
+        .on("stderr", (line) => {
+          // ffmpeg writes progress info to stderr; log sparingly
+          if (/frame=/.test(line)) {
+            const m = /frame=\s*(\d+)/.exec(line);
+            if (m) {
+              const doneFrames = parseInt(m[1], 10);
+              const pct = 85 + Math.floor((doneFrames / totalFrames) * 9);
+              try {
+                updateJobStatus.run(
+                  "processing",
+                  Math.min(pct, 94),
+                  job.id
+                );
+              } catch {
+                // ignore
+              }
+            }
+          }
+        })
+        .on("progress", (progress) => {
+          if (progress && progress.frames) {
+            const pct =
+              85 + Math.floor((progress.frames / totalFrames) * 9);
+            try {
+              updateJobStatus.run(
+                "processing",
+                Math.min(pct, 94),
+                job.id
+              );
+            } catch {
+              // ignore
+            }
+            if (progress.frames % 30 === 0) {
+              console.log(
+                `${logPrefix} ffmpeg: ${progress.frames}/${totalFrames} frames (${
+                  progress.currentFps || 0
+                } fps)`
+              );
+            }
+          }
+        })
+        .on("end", () => {
+          console.log(
+            `${logPrefix} ffmpeg done in ${Math.round(
+              (Date.now() - encodeStart) / 1000
+            )}s`
+          );
+          resolve();
+        })
+        .on("error", (err) => {
+          console.error(`${logPrefix} ffmpeg error:`, err.message);
+          reject(err);
+        });
+      cmd.run();
     });
 
     updateJobStatus.run("processing", 95, job.id);

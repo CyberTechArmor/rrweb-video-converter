@@ -116,6 +116,7 @@ function UploadForm({ onJobCreated }) {
             <option value="720p">720p (1280x720)</option>
             <option value="1080p">1080p (1920x1080)</option>
           </select>
+          <span className="setting-help">Output video dimensions</span>
         </div>
         <div className="setting">
           <label htmlFor="speed">Speed</label>
@@ -124,6 +125,9 @@ function UploadForm({ onJobCreated }) {
             <option value="2">2x</option>
             <option value="4">4x</option>
           </select>
+          <span className="setting-help">
+            Playback rate. 2x = half length, 4x = quarter length.
+          </span>
         </div>
         <div className="setting">
           <label htmlFor="fps">FPS</label>
@@ -132,6 +136,7 @@ function UploadForm({ onJobCreated }) {
             <option value="15">15</option>
             <option value="30">30</option>
           </select>
+          <span className="setting-help">Frames per second</span>
         </div>
       </div>
 

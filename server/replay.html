@@ -46,13 +46,19 @@
       width: __WIDTH__px;
       height: __HEIGHT__px;
       overflow: hidden;
-      background: #fff;
+      background: #000;
     }
     #player-container {
       width: __WIDTH__px;
       height: __HEIGHT__px;
       position: relative;
       overflow: hidden;
+      background: #000;
+    }
+    /* Replayer wrapper gets positioned and scaled via JS after init */
+    #player-container .replayer-wrapper {
+      position: absolute;
+      transform-origin: top left;
     }
     .replay-done {
       position: fixed;
@@ -101,12 +107,26 @@
         }
       }
 
-      // Surface uncaught parse/runtime errors so the worker sees them
+      // Surface uncaught parse/runtime errors so the worker sees them.
+      // Filter non-fatal errors that rrweb's sandboxed iframe can throw
+      // during replay (e.g. localStorage access is blocked in sandbox).
       window.addEventListener("error", function (e) {
-        var msg = "window.error: " + (e.message || "unknown") +
-                  (e.filename ? " @ " + e.filename + ":" + e.lineno : "");
-        log(msg);
-        if (!window.__REPLAY_ERROR__) window.__REPLAY_ERROR__ = msg;
+        var msg = (e && e.message) || "unknown";
+        var nonFatal =
+          msg.indexOf("localStorage") !== -1 ||
+          msg.indexOf("sessionStorage") !== -1 ||
+          msg.indexOf("SecurityError") !== -1 ||
+          msg.indexOf("The operation is insecure") !== -1;
+        if (nonFatal) {
+          log("non-fatal sandbox error (ignored): " + msg);
+          return;
+        }
+        var full =
+          "window.error: " +
+          msg +
+          (e.filename ? " @ " + e.filename + ":" + e.lineno : "");
+        log(full);
+        if (!window.__REPLAY_ERROR__) window.__REPLAY_ERROR__ = full;
         setDoneMarker("error");
       });
 
@@ -139,6 +159,23 @@
         }
         log("rrweb loaded, keys: " + Object.keys(rrweb).join(","));
 
+        // Find the Meta event to read the original recorded dimensions.
+        // This is an rrweb EventType.Meta event (type === 4) carrying
+        // { width, height, href }.
+        var origWidth = 0;
+        var origHeight = 0;
+        for (var i = 0; i < events.length; i++) {
+          if (events[i].type === 4 && events[i].data) {
+            origWidth = events[i].data.width || 0;
+            origHeight = events[i].data.height || 0;
+            break;
+          }
+        }
+        log("original recording dims: " + origWidth + "x" + origHeight);
+
+        var targetW = __WIDTH__;
+        var targetH = __HEIGHT__;
+
         var replayer = new rrweb.Replayer(events, {
           root: document.getElementById("player-container"),
           speed: speed,
@@ -155,6 +192,53 @@
         });
 
         window.__REPLAYER__ = replayer;
+
+        // Scale the replayer wrapper so the recorded viewport fits
+        // within the target video viewport while preserving aspect
+        // ratio. The unused area is letterboxed by the black body bg.
+        function scaleReplayer() {
+          var wrapper = document.querySelector(
+            "#player-container .replayer-wrapper"
+          );
+          if (!wrapper) {
+            log("warning: .replayer-wrapper not found for scaling");
+            return;
+          }
+          var w = origWidth;
+          var h = origHeight;
+          // Fall back to the wrapper's intrinsic size if we didn't find a meta event
+          if (!w || !h) {
+            w = wrapper.offsetWidth || targetW;
+            h = wrapper.offsetHeight || targetH;
+          }
+          var scale = Math.min(targetW / w, targetH / h);
+          var scaledW = w * scale;
+          var scaledH = h * scale;
+          var offsetX = Math.round((targetW - scaledW) / 2);
+          var offsetY = Math.round((targetH - scaledH) / 2);
+          wrapper.style.position = "absolute";
+          wrapper.style.left = offsetX + "px";
+          wrapper.style.top = offsetY + "px";
+          wrapper.style.transformOrigin = "top left";
+          wrapper.style.transform = "scale(" + scale + ")";
+          log(
+            "scaled replay: " +
+              w +
+              "x" +
+              h +
+              " -> " +
+              Math.round(scaledW) +
+              "x" +
+              Math.round(scaledH) +
+              " (scale=" +
+              scale.toFixed(3) +
+              ")"
+          );
+        }
+        // Run once synchronously (wrapper exists right after construction)
+        // and again on next tick in case rrweb adjusts it.
+        scaleReplayer();
+        setTimeout(scaleReplayer, 50);
 
         try {
           var meta = replayer.getMetaData();
