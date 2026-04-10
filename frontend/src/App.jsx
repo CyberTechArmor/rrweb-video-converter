@@ -265,8 +265,32 @@ function ProcessingView({ jobId, onDone, onError }) {
   );
 }
 
+// Slow playback speeds exposed in the viewer. 0.5x lets you preview a
+// 2x-encoded video at real time, 0.25x does the same for 4x-encoded.
+// 1x is included as a reset; 0.75x is a useful in-between for fine tuning.
+const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1];
+
 function DoneView({ jobId, jobData, onReset }) {
   const downloadUrl = `${API_BASE}/jobs/${jobId}/download`;
+  const videoRef = useRef(null);
+  const [playbackRate, setPlaybackRate] = useState(1);
+
+  // Apply the selected playbackRate to the <video> element. We also
+  // re-apply on 'loadedmetadata' because some browsers reset the rate
+  // when the source finishes loading, which would otherwise drop the
+  // user's selection on the first play.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = playbackRate;
+    const onLoaded = () => {
+      video.playbackRate = playbackRate;
+    };
+    video.addEventListener("loadedmetadata", onLoaded);
+    return () => {
+      video.removeEventListener("loadedmetadata", onLoaded);
+    };
+  }, [playbackRate]);
 
   const codecLabel = jobData.codec === "h265" ? "H.265" : "H.264";
   const stats = [
@@ -290,9 +314,23 @@ function DoneView({ jobId, jobData, onReset }) {
         ))}
       </div>
       <div className="video-preview">
-        <video controls width="100%" src={downloadUrl}>
+        <video ref={videoRef} controls width="100%" src={downloadUrl}>
           Your browser does not support the video tag.
         </video>
+      </div>
+      <div className="playback-speed-row" role="group" aria-label="Playback speed">
+        <span className="playback-speed-label">Playback</span>
+        {PLAYBACK_SPEEDS.map((rate) => (
+          <button
+            key={rate}
+            type="button"
+            className={`speed-btn ${playbackRate === rate ? "active" : ""}`}
+            onClick={() => setPlaybackRate(rate)}
+            aria-pressed={playbackRate === rate}
+          >
+            {rate}&times;
+          </button>
+        ))}
       </div>
       <div className="done-actions">
         <a href={downloadUrl} download className="btn btn-primary">

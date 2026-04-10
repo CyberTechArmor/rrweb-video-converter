@@ -314,12 +314,54 @@ body {
 .video-preview {
   border-radius: var(--radius);
   overflow: hidden;
-  margin-bottom: 1.5rem;
+  margin-bottom: 0.75rem;
   background: #000;
 }
 
 .video-preview video {
   display: block;
+}
+
+.playback-speed-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1.5rem;
+}
+
+.playback-speed-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 0.25rem;
+}
+
+.speed-btn {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.speed-btn:hover {
+  background: #f1f5f9;
+  border-color: var(--primary);
+}
+
+.speed-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
 }
 
 .done-actions {
