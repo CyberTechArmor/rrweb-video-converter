@@ -54,6 +54,8 @@ const ALLOWED_PRESETS = new Set([
   "slow",
 ]);
 
+const ALLOWED_CODECS = new Set(["h264", "h265"]);
+
 // POST /api/jobs — Upload rrweb JSON, create a job
 router.post("/jobs", upload.single("file"), (req, res) => {
   try {
@@ -68,14 +70,22 @@ router.post("/jobs", upload.single("file"), (req, res) => {
       preset = "fast";
     }
 
-    // Default CRF is 26 (size-optimized) not 23 — still perfectly
-    // readable on UI text but ~35% smaller file than crf 23.
-    let crf = parseInt(req.query.crf);
-    if (isNaN(crf) || crf < 18 || crf > 32) {
-      crf = 26;
+    let codec = String(req.query.codec || "h264").toLowerCase();
+    if (!ALLOWED_CODECS.has(codec)) {
+      codec = "h264";
     }
 
-    insertJob.run(jobId, width, height, fps, speed, preset, crf);
+    // CRF ranges differ per codec. H.264 is ~18-32 (default 26);
+    // H.265 uses a different scale where ~28 is roughly equivalent
+    // visually to H.264's ~23, so we allow the wider range 18-35.
+    let crf = parseInt(req.query.crf);
+    const crfMax = codec === "h265" ? 35 : 32;
+    const crfDefault = codec === "h265" ? 30 : 26;
+    if (isNaN(crf) || crf < 18 || crf > crfMax) {
+      crf = crfDefault;
+    }
+
+    insertJob.run(jobId, width, height, fps, speed, preset, crf, codec);
 
     res.status(201).json({ jobId, status: "queued" });
   } catch (err) {
@@ -119,6 +129,7 @@ router.get("/jobs/:id", (req, res) => {
     speed: job.speed,
     preset: job.preset,
     crf: job.crf,
+    codec: job.codec,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,

@@ -25,15 +25,18 @@ function formatHMS(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// Quality presets that map to ffmpeg preset + crf. 'Fast (Recommended)'
-// is the default — the 'fast' ffmpeg preset with an aggressive CRF of 26,
-// which produces files ~35% smaller than crf 23 with no visible
-// difference on UI text. For even smaller files, pick 'Smallest'.
+// Quality presets that map to ffmpeg codec + preset + crf.
+// 'Fast (Recommended)' is the default for broad compatibility.
+// 'Tiny (H.265)' and 'Smallest (H.265)' produce ~40-55% smaller files
+// but require a modern browser for playback (Safari, Chrome, Edge ✓;
+// Firefox-on-Linux often requires a system codec install).
 const QUALITY_PRESETS = {
-  fast:     { label: "Fast (Recommended)", help: "Small files, fast encode — best default for UI recordings",     preset: "fast",      crf: 26 },
-  small:    { label: "Smallest File",      help: "Slowest encode, smallest output — best for long-term storage", preset: "medium",    crf: 29 },
-  fastest:  { label: "Fastest Encode",     help: "Quickest processing, larger output file",                      preset: "superfast", crf: 25 },
-  hq:       { label: "Higher Quality",     help: "Slower encode, larger file, sharper text and images",          preset: "slow",      crf: 22 },
+  fast:     { label: "Fast (Recommended)",  help: "Small files, fast encode — works in every browser",               codec: "h264", preset: "fast",      crf: 26 },
+  small:    { label: "Smallest H.264",      help: "Slower encode, smaller H.264 output — universal compatibility",   codec: "h264", preset: "medium",    crf: 30 },
+  tiny:     { label: "Tiny (H.265)",        help: "~40% smaller than H.264. Safari/Chrome/Edge only — not Firefox",  codec: "h265", preset: "medium",    crf: 30 },
+  smallest: { label: "Smallest (H.265)",    help: "~55% smaller than H.264. Slowest encode. Modern browsers only",   codec: "h265", preset: "slow",      crf: 32 },
+  fastest:  { label: "Fastest Encode",      help: "Quickest processing, larger output file",                         codec: "h264", preset: "superfast", crf: 25 },
+  hq:       { label: "Higher Quality",      help: "Slower encode, larger file, sharper text and images",             codec: "h264", preset: "slow",      crf: 22 },
 };
 
 function UploadForm({ onJobCreated }) {
@@ -86,6 +89,7 @@ function UploadForm({ onJobCreated }) {
         speed,
         preset: q.preset,
         crf: q.crf,
+        codec: q.codec,
       });
 
       const formData = new FormData();
@@ -264,13 +268,14 @@ function ProcessingView({ jobId, onDone, onError }) {
 function DoneView({ jobId, jobData, onReset }) {
   const downloadUrl = `${API_BASE}/jobs/${jobId}/download`;
 
+  const codecLabel = jobData.codec === "h265" ? "H.265" : "H.264";
   const stats = [
     { label: "File size",       value: formatBytes(jobData.fileSize) },
     { label: "Duration",        value: formatDuration(jobData.videoDurationMs) },
     { label: "Resolution",      value: jobData.width && jobData.height ? `${jobData.width}×${jobData.height}` : "—" },
     { label: "FPS",             value: jobData.fps ? `${jobData.fps}` : "—" },
     { label: "Processing time", value: formatDuration(jobData.processingTimeMs) },
-    { label: "Preset",          value: jobData.preset ? `${jobData.preset} · crf ${jobData.crf}` : "—" },
+    { label: "Encoding",        value: jobData.preset ? `${codecLabel} · ${jobData.preset} · crf ${jobData.crf}` : "—" },
   ];
 
   return (

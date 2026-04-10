@@ -20,6 +20,7 @@ db.exec(`
     speed REAL NOT NULL DEFAULT 1,
     preset TEXT NOT NULL DEFAULT 'fast',
     crf INTEGER NOT NULL DEFAULT 26,
+    codec TEXT NOT NULL DEFAULT 'h264',
     error TEXT,
     file_size INTEGER,
     video_duration_ms INTEGER,
@@ -44,16 +45,17 @@ function addColumnIfMissing(name, def) {
 }
 addColumnIfMissing("preset", "TEXT NOT NULL DEFAULT 'fast'");
 addColumnIfMissing("crf", "INTEGER NOT NULL DEFAULT 26");
+addColumnIfMissing("codec", "TEXT NOT NULL DEFAULT 'h264'");
 addColumnIfMissing("video_duration_ms", "INTEGER");
 addColumnIfMissing("started_at", "TEXT");
 
 const insertJob = db.prepare(`
-  INSERT INTO jobs (id, width, height, fps, speed, preset, crf)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO jobs (id, width, height, fps, speed, preset, crf, codec)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const getJob = db.prepare(`
-  SELECT id, status, progress, width, height, fps, speed, preset, crf,
+  SELECT id, status, progress, width, height, fps, speed, preset, crf, codec,
          error, file_size AS fileSize, video_duration_ms AS videoDurationMs,
          created_at AS createdAt, started_at AS startedAt,
          completed_at AS completedAt
@@ -61,7 +63,7 @@ const getJob = db.prepare(`
 `);
 
 const getQueuedJob = db.prepare(`
-  SELECT id, width, height, fps, speed, preset, crf
+  SELECT id, width, height, fps, speed, preset, crf, codec
   FROM jobs WHERE status = 'queued'
   ORDER BY created_at ASC LIMIT 1
 `);

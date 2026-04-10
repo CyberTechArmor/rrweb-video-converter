@@ -560,17 +560,32 @@ async function processJob(job) {
     console.log(`${logPrefix} Encoding with ffmpeg (${totalFrames} frames)...`);
     const encodeStart = Date.now();
 
-    // Use the preset and CRF specified on the job. The API/frontend
-    // exposes these via a Quality dropdown; default is 'fast'/26 which
-    // is size-optimized but still visually good for UI recordings.
+    // Use the preset, CRF, and codec specified on the job. The API
+    // and frontend expose these via a Quality dropdown; default is
+    // h264 / fast / crf 26.
     const preset = job.preset || "fast";
-    const crf = typeof job.crf === "number" ? job.crf : 26;
+    const codec = job.codec || "h264";
+    const defaultCrf = codec === "h265" ? 30 : 26;
+    const crf = typeof job.crf === "number" ? job.crf : defaultCrf;
+
+    // Build codec-specific ffmpeg args. libx265 at similar-perceived
+    // quality produces ~40% smaller files than libx264 but is ~3-5x
+    // slower to encode. The hvc1 tag is required for QuickTime/Safari
+    // playback and is safer than hev1.
+    const codecArgs =
+      codec === "h265"
+        ? ["-vcodec", "libx265", "-tag:v", "hvc1",
+           // Tell libx265 to keep logs quiet; otherwise it prints
+           // 10+ lines of info to stderr that break our progress
+           // parser on the first run.
+           "-x265-params", "log-level=error"]
+        : ["-vcodec", "libx264"];
 
     const ffmpegArgs = [
       "-y",
       "-r", String(inputFps.toFixed(4)),
       "-i", path.join(framesDir, "frame_%06d.jpg"),
-      "-vcodec", "libx264",
+      ...codecArgs,
       "-pix_fmt", "yuv420p",
       "-s", `${job.width}x${job.height}`,
       "-r", String(job.fps),
