@@ -6,6 +6,7 @@ const puppeteer = require("puppeteer");
 const {
   getQueuedJob,
   updateJobStatus,
+  markJobStarted,
   completeJob,
   failJob,
   getExpiredJobs,
@@ -227,9 +228,11 @@ async function processJob(job) {
   const framesDir = path.join(jobDir, "frames");
 
   const logPrefix = `[job ${job.id}]`;
-  console.log(`${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x)`);
+  console.log(
+    `${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x, preset ${job.preset}, crf ${job.crf})`
+  );
   logMem(logPrefix, "start");
-  updateJobStatus.run("processing", 5, job.id);
+  markJobStarted.run(5, job.id);
 
   if (!RRWEB_AVAILABLE) {
     failJob.run(
@@ -557,6 +560,12 @@ async function processJob(job) {
     console.log(`${logPrefix} Encoding with ffmpeg (${totalFrames} frames)...`);
     const encodeStart = Date.now();
 
+    // Use the preset and CRF specified on the job. The API/frontend
+    // exposes these via a Quality dropdown; default is 'fast'/23 which
+    // is a good balance for UI recordings.
+    const preset = job.preset || "fast";
+    const crf = typeof job.crf === "number" ? job.crf : 23;
+
     const ffmpegArgs = [
       "-y",
       "-r", String(inputFps.toFixed(4)),
@@ -565,15 +574,8 @@ async function processJob(job) {
       "-pix_fmt", "yuv420p",
       "-s", `${job.width}x${job.height}`,
       "-r", String(job.fps),
-      // veryfast strikes a good balance between encode speed and
-      // file size for UI recordings. ultrafast is ~2x faster but
-      // produces 3-5x larger files because it disables CABAC and
-      // several other size-saving tricks. veryfast keeps CABAC,
-      // which is the single biggest lever on file size.
-      "-preset", "veryfast",
-      // CRF 25 is visually indistinguishable from 23 on UI text
-      // and shaves ~30% off the file size.
-      "-crf", "25",
+      "-preset", preset,
+      "-crf", String(crf),
       "-movflags", "+faststart",
       "-threads", "0",
       outputPath,
@@ -677,9 +679,15 @@ async function processJob(job) {
       // ignore
     }
 
-    completeJob.run(stats.size, job.id);
+    // Store the capture wall-clock duration as the authoritative
+    // video duration. This matches what ffmpeg actually produced
+    // because we set the input framerate from this exact value.
+    const videoDurationMs = Math.round(captureElapsedMs);
+    completeJob.run(stats.size, videoDurationMs, job.id);
     console.log(
-      `${logPrefix} Complete — ${(stats.size / 1024 / 1024).toFixed(2)} MB`
+      `${logPrefix} Complete — ${(stats.size / 1024 / 1024).toFixed(
+        2
+      )} MB, ${(videoDurationMs / 1000).toFixed(2)}s duration`
     );
   } catch (err) {
     console.error(`${logPrefix} FAILED:`, err);
