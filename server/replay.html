@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=__WIDTH__, initial-scale=1.0" />
   <title>rrweb Replay</title>
-  <link rel="stylesheet" href="__RRWEB_CSS_URL__" />
+  <style>
+/* __RRWEB_CSS__ */
+  </style>
   <style>
     * {
       margin: 0;
@@ -38,12 +40,11 @@
   <div id="player-container"></div>
   <div id="done-marker"></div>
 
-  <script src="__RRWEB_JS_URL__"></script>
+  <script>
+/* __RRWEB_JS__ */
+  </script>
   <script>
     (function () {
-      const events = __EVENTS_PLACEHOLDER__;
-      const speed = __SPEED__;
-
       window.__REPLAY_READY__ = false;
       window.__REPLAY_DONE__ = false;
       window.__REPLAY_ERROR__ = null;
@@ -51,31 +52,50 @@
 
       function log(msg) {
         window.__REPLAY_LOG__.push(msg);
-        console.log("[replay] " + msg);
+        try { console.log("[replay] " + msg); } catch (e) {}
       }
 
       function setDoneMarker(text) {
-        const marker = document.getElementById("done-marker");
-        marker.className = "replay-done";
-        marker.textContent = text;
+        var marker = document.getElementById("done-marker");
+        if (marker) {
+          marker.className = "replay-done";
+          marker.textContent = text;
+        }
       }
 
+      // Surface uncaught parse/runtime errors so the worker sees them
+      window.addEventListener("error", function (e) {
+        var msg = "window.error: " + (e.message || "unknown") +
+                  (e.filename ? " @ " + e.filename + ":" + e.lineno : "");
+        log(msg);
+        if (!window.__REPLAY_ERROR__) window.__REPLAY_ERROR__ = msg;
+        setDoneMarker("error");
+      });
+
       try {
-        log("script start");
+        log("init script start");
+
+        var events = window.__EVENTS_DATA__;
+        var speed = window.__REPLAY_SPEED__;
+
+        if (!events) throw new Error("__EVENTS_DATA__ was not injected");
+        log("events count: " + events.length);
+
         if (typeof rrweb === "undefined") {
-          throw new Error("rrweb global is undefined (UMD bundle did not load)");
+          throw new Error(
+            "rrweb global is undefined (UMD bundle did not load or failed to parse)"
+          );
         }
         if (!rrweb.Replayer) {
           throw new Error(
-            "rrweb.Replayer is undefined (available keys: " +
-              Object.keys(rrweb).join(", ") +
+            "rrweb.Replayer is undefined (keys: " +
+              Object.keys(rrweb).join(",") +
               ")"
           );
         }
         log("rrweb loaded, keys: " + Object.keys(rrweb).join(","));
-        log("events count: " + (events && events.length));
 
-        const replayer = new rrweb.Replayer(events, {
+        var replayer = new rrweb.Replayer(events, {
           root: document.getElementById("player-container"),
           speed: speed,
           skipInactive: false,
@@ -100,9 +120,9 @@
         window.__REPLAY_READY__ = true;
         log("replayer ready and playing");
       } catch (err) {
-        const msg = (err && err.message) || String(err);
-        log("ERROR: " + msg);
-        console.error("rrweb init failed:", err);
+        var msg = (err && err.message) || String(err);
+        log("INIT ERROR: " + msg);
+        try { console.error("rrweb init failed:", err); } catch (e) {}
         window.__REPLAY_ERROR__ = msg;
         setDoneMarker("error");
       }

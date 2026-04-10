@@ -23,6 +23,21 @@ if (fs.existsSync(frontendDist)) {
   });
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`API server running on http://localhost:${PORT}`);
+});
+
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `\n[server] Port ${PORT} is already in use.\n` +
+        `Another rrweb-video-converter process is likely still running.\n` +
+        `Find and stop it:\n` +
+        `  lsof -i :${PORT}         # find the PID\n` +
+        `  kill <pid>               # or: pkill -f "node server"\n`
+    );
+  } else {
+    console.error("[server] Listen error:", err);
+  }
+  process.exit(1);
 });
