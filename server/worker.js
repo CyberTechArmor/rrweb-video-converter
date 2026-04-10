@@ -561,10 +561,10 @@ async function processJob(job) {
     const encodeStart = Date.now();
 
     // Use the preset and CRF specified on the job. The API/frontend
-    // exposes these via a Quality dropdown; default is 'fast'/23 which
-    // is a good balance for UI recordings.
+    // exposes these via a Quality dropdown; default is 'fast'/26 which
+    // is size-optimized but still visually good for UI recordings.
     const preset = job.preset || "fast";
-    const crf = typeof job.crf === "number" ? job.crf : 23;
+    const crf = typeof job.crf === "number" ? job.crf : 26;
 
     const ffmpegArgs = [
       "-y",
