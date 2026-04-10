@@ -134,6 +134,14 @@ body {
   cursor: pointer;
 }
 
+.setting-help {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
 .error-msg {
   background: #fef2f2;
   color: var(--error);
