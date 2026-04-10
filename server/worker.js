@@ -142,14 +142,31 @@ function escapeForHtmlEmbed(content) {
     .replace(/<\/style/gi, "<\\/style");
 }
 
-function buildReplayHtml(job) {
+// Serialize a JS value for safe embedding inside a <script> tag.
+// JSON is a subset of JS expressions, but we also need to escape
+// sequences that would corrupt the HTML parse or break JS string
+// literals in older parsers:
+//   < / > / &   — defense against </script> and HTML parser quirks
+//   U+2028/2029 — pre-ES2019 line terminators in JS string literals
+function htmlSafeJson(obj) {
+  return JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function buildReplayHtml(events, job) {
   // Use function form of .replace so '$' sequences in the replacement
   // values aren't interpreted as back-references.
   return REPLAY_HTML_TEMPLATE
     .replace("/* __RRWEB_CSS__ */", () => escapeForHtmlEmbed(RRWEB_CSS_CONTENT))
     .replace("/* __RRWEB_JS__ */", () => escapeForHtmlEmbed(RRWEB_JS_CONTENT))
+    .replace("/* __EVENTS_JSON__ */ null", () => htmlSafeJson(events))
     .replace(/__WIDTH__/g, String(job.width))
-    .replace(/__HEIGHT__/g, String(job.height));
+    .replace(/__HEIGHT__/g, String(job.height))
+    .replace("__SPEED__", String(job.speed));
 }
 
 function parseEventsJson(raw) {
@@ -196,9 +213,13 @@ async function processJob(job) {
     console.log(`${logPrefix} Loaded ${events.length} events`);
     updateJobStatus.run("processing", 10, job.id);
 
-    // 2. Build the replay HTML with rrweb inlined
+    // 2. Build the replay HTML — rrweb JS/CSS, events JSON, and
+    //    visibility override are all inlined so the page is fully
+    //    self-contained and doesn't rely on any CDP-injected state
+    //    (evaluateOnNewDocument doesn't fire for setContent because
+    //    setContent reuses the current document via document.open).
     console.log(`${logPrefix} Building replay HTML...`);
-    const html = buildReplayHtml(job);
+    const html = buildReplayHtml(events, job);
     // Write to disk for post-mortem debugging
     fs.writeFileSync(tempHtmlPath, html);
     console.log(`${logPrefix} HTML size: ${html.length} bytes`);
@@ -260,30 +281,8 @@ async function processJob(job) {
 
     updateJobStatus.run("processing", 30, job.id);
 
-    // 4a. Force the page to look "visible" so requestAnimationFrame
-    //     isn't throttled to 1Hz in headless mode (rrweb's Replayer
-    //     uses rAF internally to drive playback).
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(document, "hidden", {
-        configurable: true,
-        get: () => false,
-      });
-      Object.defineProperty(document, "visibilityState", {
-        configurable: true,
-        get: () => "visible",
-      });
-      Object.defineProperty(document, "webkitHidden", {
-        configurable: true,
-        get: () => false,
-      });
-      Object.defineProperty(document, "webkitVisibilityState", {
-        configurable: true,
-        get: () => "visible",
-      });
-    });
-
-    // Tell Chromium to emulate a focused, visible page. Belt-and-
-    // suspenders alongside the property overrides above.
+    // 4. Tell Chromium to emulate a focused page — belt-and-suspenders
+    //    alongside the inline document.visibilityState override.
     try {
       const tmpClient = await page.target().createCDPSession();
       await tmpClient.send("Emulation.setFocusEmulationEnabled", {
@@ -296,23 +295,12 @@ async function processJob(job) {
       );
     }
 
-    updateJobStatus.run("processing", 32, job.id);
+    updateJobStatus.run("processing", 35, job.id);
 
-    // 4b. Inject events via CDP (not through HTML string substitution) so
-    //     event content can't break HTML/JS parsing. evaluateOnNewDocument
-    //     runs before any page script, so the init script will see the
-    //     globals by the time it executes.
-    console.log(`${logPrefix} Injecting events into page context...`);
-    await page.evaluateOnNewDocument(
-      (eventsArg, speedArg) => {
-        window.__EVENTS_DATA__ = eventsArg;
-        window.__REPLAY_SPEED__ = speedArg;
-      },
-      events,
-      job.speed
-    );
-
-    // 5. Set content directly — avoids file:// origin issues completely
+    // 5. Set the replay HTML content. Everything is inlined — rrweb JS,
+    //    rrweb CSS, events JSON, visibility override — so no additional
+    //    CDP injection is needed. This avoids the evaluateOnNewDocument +
+    //    setContent timing problem entirely.
     console.log(`${logPrefix} Setting replay HTML content...`);
     await page.setContent(html, {
       waitUntil: "domcontentloaded",

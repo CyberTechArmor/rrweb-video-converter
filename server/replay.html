@@ -4,6 +4,35 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=__WIDTH__, initial-scale=1.0" />
   <title>rrweb Replay</title>
+
+  <script>
+    // Override document visibility BEFORE any other script so rrweb's
+    // requestAnimationFrame-based playback isn't throttled to 1Hz by
+    // headless Chromium's default 'hidden' visibility state.
+    (function () {
+      try {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          get: function () { return false; },
+        });
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          get: function () { return "visible"; },
+        });
+        Object.defineProperty(document, "webkitHidden", {
+          configurable: true,
+          get: function () { return false; },
+        });
+        Object.defineProperty(document, "webkitVisibilityState", {
+          configurable: true,
+          get: function () { return "visible"; },
+        });
+      } catch (e) {
+        console.warn("visibility override failed:", e);
+      }
+    })();
+  </script>
+
   <style>
 /* __RRWEB_CSS__ */
   </style>
@@ -44,11 +73,20 @@
 /* __RRWEB_JS__ */
   </script>
   <script>
+    // Events and speed are inlined as JSON literals. htmlSafeJson in the
+    // worker escapes <, >, &, U+2028/U+2029 so this is safe inside a
+    // <script> tag regardless of event content.
+    window.__EVENTS_DATA__ = /* __EVENTS_JSON__ */ null;
+    window.__REPLAY_SPEED__ = __SPEED__;
+  </script>
+  <script>
     (function () {
       window.__REPLAY_READY__ = false;
       window.__REPLAY_DONE__ = false;
       window.__REPLAY_ERROR__ = null;
       window.__REPLAY_LOG__ = [];
+      window.__REPLAY_CURRENT_MS__ = 0;
+      window.__REPLAY_TOTAL_MS__ = 0;
 
       function log(msg) {
         window.__REPLAY_LOG__.push(msg);
@@ -78,8 +116,14 @@
         var events = window.__EVENTS_DATA__;
         var speed = window.__REPLAY_SPEED__;
 
-        if (!events) throw new Error("__EVENTS_DATA__ was not injected");
+        if (!events || !events.length) {
+          throw new Error(
+            "events missing or empty (type: " + typeof events + ")"
+          );
+        }
         log("events count: " + events.length);
+        log("speed: " + speed);
+        log("visibilityState: " + document.visibilityState);
 
         if (typeof rrweb === "undefined") {
           throw new Error(
@@ -110,8 +154,8 @@
           UNSAFE_replayCanvas: true,
         });
 
-        // Expose replayer + metadata for the worker to poll
         window.__REPLAYER__ = replayer;
+
         try {
           var meta = replayer.getMetaData();
           window.__REPLAY_TOTAL_MS__ =
@@ -134,7 +178,6 @@
         // Fallback: rrweb's finish event occasionally misses. Poll
         // getCurrentTime() and flip __REPLAY_DONE__ ourselves once
         // we've reached the end.
-        var pollStart = Date.now();
         var fallbackInterval = setInterval(function () {
           try {
             if (window.__REPLAY_DONE__) {
@@ -146,7 +189,6 @@
                 ? replayer.getCurrentTime()
                 : 0;
             window.__REPLAY_CURRENT_MS__ = cur;
-            // Add a grace period of 500ms past the end
             if (cur >= window.__REPLAY_TOTAL_MS__ + 500) {
               log(
                 "fallback: reached end of replay (" +
