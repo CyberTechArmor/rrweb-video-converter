@@ -1,6 +1,7 @@
 require("./env");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { spawn } = require("child_process");
 const puppeteer = require("puppeteer");
 const {
@@ -173,13 +174,43 @@ function buildReplayHtml(events, job) {
 // Log memory usage so leaks show up in the worker log immediately
 function logMem(prefix, step) {
   const m = process.memoryUsage();
+  const sysTotalMB = Math.round(os.totalmem() / 1024 / 1024);
+  const sysFreeMB = Math.round(os.freemem() / 1024 / 1024);
   console.log(
     `${prefix} [mem:${step}] rss=${Math.round(
       m.rss / 1024 / 1024
     )}MB heap=${Math.round(m.heapUsed / 1024 / 1024)}MB external=${Math.round(
       m.external / 1024 / 1024
-    )}MB`
+    )}MB | sys free=${sysFreeMB}/${sysTotalMB}MB`
   );
+}
+
+// Log the host/container resource limits at worker startup so users
+// can see in the log whether they're memory-constrained before they
+// even run their first job.
+function logSystemResources() {
+  const totalMB = Math.round(os.totalmem() / 1024 / 1024);
+  const freeMB = Math.round(os.freemem() / 1024 / 1024);
+  const cpus = os.cpus().length;
+  console.log(
+    `[system] CPUs: ${cpus} | Memory: ${freeMB}/${totalMB} MB free | Node: ${process.version}`
+  );
+  if (totalMB < 2048) {
+    console.warn(
+      `[system] WARNING: total memory is ${totalMB} MB. This is below the recommended 2 GB minimum.`
+    );
+    console.warn(
+      `[system] For stable operation with Chromium + libx264/libx265 encoding, resize the container to at least 2 GB RAM / 2 CPUs (4 GB / 4 CPUs recommended).`
+    );
+    console.warn(
+      `[system] On constrained systems, use: 720p resolution, H.264 codec, 'Fast' preset, 2x+ playback speed, 10 fps.`
+    );
+  }
+  if (cpus < 2) {
+    console.warn(
+      `[system] WARNING: only 1 CPU core detected. Encoding will be slow and may oversubscribe the scheduler.`
+    );
+  }
 }
 
 // Await a promise but enforce a hard timeout. Used for browser close
@@ -229,10 +260,23 @@ async function processJob(job) {
 
   const logPrefix = `[job ${job.id}]`;
   console.log(
-    `${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x, preset ${job.preset}, crf ${job.crf})`
+    `${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x, preset ${job.preset}, crf ${job.crf}, codec ${job.codec})`
   );
   logMem(logPrefix, "start");
   markJobStarted.run(5, job.id);
+
+  // Memory precheck: refuse to start if less than MIN_FREE_MB is available.
+  // Chromium launch alone needs ~300-500 MB; with libx265 encoding on top
+  // the worst case is ~800 MB. Fail fast with a clear error rather than
+  // OOM-killing the whole container.
+  const MIN_FREE_MB = 350;
+  const freeMB = Math.round(os.freemem() / 1024 / 1024);
+  if (freeMB < MIN_FREE_MB) {
+    const msg = `Refusing to start: only ${freeMB} MB free (need >${MIN_FREE_MB} MB). Resize the container or wait for memory to free up.`;
+    console.error(`${logPrefix} ${msg}`);
+    failJob.run(msg, job.id);
+    return;
+  }
 
   if (!RRWEB_AVAILABLE) {
     failJob.run(
@@ -281,6 +325,20 @@ async function processJob(job) {
         "--allow-file-access-from-files",
         "--hide-scrollbars",
         "--mute-audio",
+        // Memory-reduction flags for constrained environments:
+        "--disable-features=TranslateUI,BlinkGenPropertyTrees,InterestCohort,CalculateNativeWinOcclusion",
+        "--disable-extensions",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--disable-breakpad",
+        "--disable-ipc-flooding-protection",
+        "--no-first-run",
+        "--no-default-browser-check",
+        // Cap Chromium's JS heap at ~300 MB. rrweb replay doesn't need more
+        // and this prevents a runaway memory leak from taking down the
+        // container. Adjust if you see 'Out of memory' page errors.
+        "--js-flags=--max-old-space-size=300",
         `--window-size=${job.width},${job.height}`,
       ],
     };
@@ -581,6 +639,13 @@ async function processJob(job) {
            "-x265-params", "log-level=error"]
         : ["-vcodec", "libx264"];
 
+    // Cap ffmpeg thread count to actual CPU count. '-threads 0' means
+    // "auto", which libx264/libx265 interpret as cores * 1.5 — that
+    // oversubscribes the scheduler on constrained containers. Set it
+    // to the real count, or 1 if we only have a single core.
+    const cpuCount = Math.max(1, os.cpus().length);
+    const ffmpegThreads = String(cpuCount);
+
     const ffmpegArgs = [
       "-y",
       "-r", String(inputFps.toFixed(4)),
@@ -592,7 +657,7 @@ async function processJob(job) {
       "-preset", preset,
       "-crf", String(crf),
       "-movflags", "+faststart",
-      "-threads", "0",
+      "-threads", ffmpegThreads,
       // Force ffmpeg to emit structured progress in key=value line
       // form every 0.5s. Without this, ffmpeg's stderr is block-
       // buffered (4KB) when stderr is a pipe, so we might see zero
@@ -851,6 +916,7 @@ async function pollLoop() {
 
 // Start
 console.log("Worker started, polling for jobs...");
+logSystemResources();
 cleanupExpiredJobs();
 setInterval(cleanupExpiredJobs, CLEANUP_INTERVAL);
 pollLoop();
