@@ -1,8 +1,8 @@
 require("./env");
 const path = require("path");
 const fs = require("fs");
+const { spawn } = require("child_process");
 const puppeteer = require("puppeteer");
-const ffmpeg = require("fluent-ffmpeg");
 const {
   getQueuedJob,
   updateJobStatus,
@@ -504,38 +504,60 @@ async function processJob(job) {
     console.log(`${logPrefix} Wrote ${totalFrames} frames to disk`);
     updateJobStatus.run("processing", 85, job.id);
 
-    // 8. Encode with ffmpeg. Use 'progress' events to tick 85→94 during
-    //    encoding so the UI moves smoothly even on slow 1080p runs.
+    // 8. Encode with ffmpeg via direct child_process.spawn.
+    //    Using spawn directly (instead of fluent-ffmpeg) because:
+    //      - We can parse stderr line-by-line AND handle \r progress
+    //        updates (ffmpeg uses \r to rewrite progress on one line).
+    //      - We get reliable exit codes and signals on timeout/crash.
+    //      - No reliance on fluent-ffmpeg's inconsistent progress
+    //        event emission for image-sequence inputs.
     console.log(`${logPrefix} Encoding with ffmpeg (${totalFrames} frames)...`);
     const encodeStart = Date.now();
+
+    const ffmpegArgs = [
+      "-y",
+      "-r", String(inputFps.toFixed(4)),
+      "-i", path.join(framesDir, "frame_%06d.jpg"),
+      "-vcodec", "libx264",
+      "-pix_fmt", "yuv420p",
+      "-s", `${job.width}x${job.height}`,
+      "-r", String(job.fps),
+      "-preset", "ultrafast",
+      "-crf", "23",
+      "-movflags", "+faststart",
+      "-threads", "0",
+      outputPath,
+    ];
+
+    console.log(`${logPrefix} ffmpeg ${ffmpegArgs.join(" ")}`);
+
     await new Promise((resolve, reject) => {
-      const cmd = ffmpeg()
-        .input(path.join(framesDir, "frame_%06d.jpg"))
-        .inputFPS(inputFps)
-        .videoCodec("libx264")
-        .outputOptions([
-          "-pix_fmt yuv420p",
-          `-s ${job.width}x${job.height}`,
-          // Output framerate — ffmpeg will duplicate/drop frames as
-          // needed to match this while preserving the input timing
-          `-r ${job.fps}`,
-          // ultrafast: ~3x faster than 'fast' at ~10% larger file size.
-          // For UI recordings this tradeoff is almost always worth it.
-          "-preset ultrafast",
-          "-crf 23",
-          "-movflags +faststart",
-          // Use all available cores
-          `-threads 0`,
-        ])
-        .output(outputPath)
-        .on("start", (line) => console.log(`${logPrefix} ffmpeg: ${line}`))
-        .on("stderr", (line) => {
-          // ffmpeg writes progress info to stderr; log sparingly
-          if (/frame=/.test(line)) {
-            const m = /frame=\s*(\d+)/.exec(line);
-            if (m) {
-              const doneFrames = parseInt(m[1], 10);
-              const pct = 85 + Math.floor((doneFrames / totalFrames) * 9);
+      const proc = spawn("ffmpeg", ffmpegArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stderrTail = "";
+      let stderrBuf = "";
+      let lastDoneFrames = 0;
+
+      proc.stderr.on("data", (chunk) => {
+        const text = chunk.toString();
+        stderrBuf += text;
+        // Keep a rolling tail for error diagnostics
+        stderrTail = (stderrTail + text).slice(-4000);
+
+        // ffmpeg progress lines end with \r; split on both \r and \n.
+        const parts = stderrBuf.split(/[\r\n]/);
+        stderrBuf = parts.pop() || "";
+        for (const line of parts) {
+          if (!line.trim()) continue;
+          const fm = /frame=\s*(\d+)/.exec(line);
+          if (fm) {
+            const doneFrames = parseInt(fm[1], 10);
+            if (doneFrames > lastDoneFrames) {
+              lastDoneFrames = doneFrames;
+              const pct =
+                85 + Math.floor((doneFrames / totalFrames) * 9);
               try {
                 updateJobStatus.run(
                   "processing",
@@ -545,44 +567,53 @@ async function processJob(job) {
               } catch {
                 // ignore
               }
+              if (doneFrames % 30 === 0 || doneFrames === totalFrames) {
+                console.log(
+                  `${logPrefix} ffmpeg: ${doneFrames}/${totalFrames} frames`
+                );
+              }
             }
           }
-        })
-        .on("progress", (progress) => {
-          if (progress && progress.frames) {
-            const pct =
-              85 + Math.floor((progress.frames / totalFrames) * 9);
-            try {
-              updateJobStatus.run(
-                "processing",
-                Math.min(pct, 94),
-                job.id
-              );
-            } catch {
-              // ignore
-            }
-            if (progress.frames % 30 === 0) {
-              console.log(
-                `${logPrefix} ffmpeg: ${progress.frames}/${totalFrames} frames (${
-                  progress.currentFps || 0
-                } fps)`
-              );
-            }
+          // Surface real errors
+          if (/error|failed|invalid data|no such file/i.test(line)) {
+            console.warn(`${logPrefix} ffmpeg stderr: ${line.trim()}`);
           }
-        })
-        .on("end", () => {
-          console.log(
-            `${logPrefix} ffmpeg done in ${Math.round(
-              (Date.now() - encodeStart) / 1000
-            )}s`
-          );
+        }
+      });
+
+      proc.on("error", (err) => {
+        console.error(`${logPrefix} ffmpeg spawn error:`, err.message);
+        reject(err);
+      });
+
+      // Hard timeout so a hung ffmpeg can't stall the worker forever
+      const timeoutMs = 10 * 60 * 1000; // 10 minutes
+      const timeout = setTimeout(() => {
+        console.error(
+          `${logPrefix} ffmpeg timeout (${timeoutMs / 1000}s), killing process`
+        );
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, timeoutMs);
+
+      proc.on("close", (code, signal) => {
+        clearTimeout(timeout);
+        const elapsed = Math.round((Date.now() - encodeStart) / 1000);
+        if (code === 0) {
+          console.log(`${logPrefix} ffmpeg done in ${elapsed}s`);
           resolve();
-        })
-        .on("error", (err) => {
-          console.error(`${logPrefix} ffmpeg error:`, err.message);
+        } else {
+          const err = new Error(
+            `ffmpeg exited with code ${code}${
+              signal ? ` (signal ${signal})` : ""
+            } after ${elapsed}s\nLast stderr:\n${stderrTail}`
+          );
           reject(err);
-        });
-      cmd.run();
+        }
+      });
     });
 
     updateJobStatus.run("processing", 95, job.id);
