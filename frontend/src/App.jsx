@@ -3,17 +3,43 @@ import React, { useState, useCallback, useEffect, useRef } from "react";
 const API_BASE = "/api";
 
 function formatBytes(bytes) {
-  if (!bytes) return "";
+  if (!bytes) return "—";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
+
+function formatDuration(ms) {
+  if (ms == null || isNaN(ms)) return "—";
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatHMS(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Quality presets that map to ffmpeg preset + crf. Keeps the UI simple
+// while letting the backend do the right thing. 'Fast' is the default.
+const QUALITY_PRESETS = {
+  fast:     { label: "Fast (Balanced)",    help: "Good quality, reasonable file size, fast encode", preset: "fast",      crf: 23 },
+  small:    { label: "Smaller File",       help: "Slower encode, noticeably smaller output",        preset: "medium",    crf: 27 },
+  fastest:  { label: "Fastest Encode",     help: "Quickest processing, larger output file",         preset: "superfast", crf: 24 },
+  hq:       { label: "Higher Quality",     help: "Slower encode, larger file, sharper output",      preset: "slow",      crf: 20 },
+};
 
 function UploadForm({ onJobCreated }) {
   const [file, setFile] = useState(null);
   const [resolution, setResolution] = useState("720p");
   const [speed, setSpeed] = useState("1");
   const [fps, setFps] = useState("15");
+  const [quality, setQuality] = useState("fast");
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState(null);
@@ -50,11 +76,14 @@ function UploadForm({ onJobCreated }) {
 
     try {
       const { w, h } = resMap[resolution];
+      const q = QUALITY_PRESETS[quality];
       const params = new URLSearchParams({
         width: w,
         height: h,
         fps,
         speed,
+        preset: q.preset,
+        crf: q.crf,
       });
 
       const formData = new FormData();
@@ -138,6 +167,15 @@ function UploadForm({ onJobCreated }) {
           </select>
           <span className="setting-help">Frames per second</span>
         </div>
+        <div className="setting setting-wide">
+          <label htmlFor="quality">Quality</label>
+          <select id="quality" value={quality} onChange={(e) => setQuality(e.target.value)}>
+            {Object.entries(QUALITY_PRESETS).map(([k, v]) => (
+              <option key={k} value={k}>{v.label}</option>
+            ))}
+          </select>
+          <span className="setting-help">{QUALITY_PRESETS[quality].help}</span>
+        </div>
       </div>
 
       {error && <div className="error-msg">{error}</div>}
@@ -152,6 +190,17 @@ function UploadForm({ onJobCreated }) {
 function ProcessingView({ jobId, onDone, onError }) {
   const [status, setStatus] = useState("queued");
   const [progress, setProgress] = useState(0);
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  // Local ticking timer — updates every second so the user sees
+  // elapsed time without waiting for the 2-second poll cycle.
+  useEffect(() => {
+    const start = Date.now();
+    const t = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - start) / 1000));
+    }, 500);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -197,12 +246,15 @@ function ProcessingView({ jobId, onDone, onError }) {
       <div className="spinner"></div>
       <h2>{statusText[status] || "Processing..."}</h2>
       <p className="job-id">Job: {jobId}</p>
-      {status === "processing" && (
+      <div className="progress-row">
         <div className="progress-bar-container">
           <div className="progress-bar" style={{ width: `${progress}%` }}></div>
           <span className="progress-text">{progress}%</span>
         </div>
-      )}
+        <span className="elapsed-time" title="Elapsed time">
+          {formatHMS(elapsedSec)}
+        </span>
+      </div>
     </div>
   );
 }
@@ -210,12 +262,26 @@ function ProcessingView({ jobId, onDone, onError }) {
 function DoneView({ jobId, jobData, onReset }) {
   const downloadUrl = `${API_BASE}/jobs/${jobId}/download`;
 
+  const stats = [
+    { label: "File size",       value: formatBytes(jobData.fileSize) },
+    { label: "Duration",        value: formatDuration(jobData.videoDurationMs) },
+    { label: "Resolution",      value: jobData.width && jobData.height ? `${jobData.width}×${jobData.height}` : "—" },
+    { label: "FPS",             value: jobData.fps ? `${jobData.fps}` : "—" },
+    { label: "Processing time", value: formatDuration(jobData.processingTimeMs) },
+    { label: "Preset",          value: jobData.preset ? `${jobData.preset} · crf ${jobData.crf}` : "—" },
+  ];
+
   return (
     <div className="done-view">
       <h2>Conversion Complete</h2>
-      {jobData.fileSize && (
-        <p className="file-size-info">File size: {formatBytes(jobData.fileSize)}</p>
-      )}
+      <div className="stats-grid">
+        {stats.map((s) => (
+          <div className="stat" key={s.label}>
+            <div className="stat-label">{s.label}</div>
+            <div className="stat-value">{s.value}</div>
+          </div>
+        ))}
+      </div>
       <div className="video-preview">
         <video controls width="100%" src={downloadUrl}>
           Your browser does not support the video tag.

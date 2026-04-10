@@ -44,6 +44,16 @@ const upload = multer({
   },
 });
 
+const ALLOWED_PRESETS = new Set([
+  "ultrafast",
+  "superfast",
+  "veryfast",
+  "faster",
+  "fast",
+  "medium",
+  "slow",
+]);
+
 // POST /api/jobs — Upload rrweb JSON, create a job
 router.post("/jobs", upload.single("file"), (req, res) => {
   try {
@@ -53,7 +63,17 @@ router.post("/jobs", upload.single("file"), (req, res) => {
     const fps = parseInt(req.query.fps) || 15;
     const speed = parseFloat(req.query.speed) || 1;
 
-    insertJob.run(jobId, width, height, fps, speed);
+    let preset = String(req.query.preset || "fast").toLowerCase();
+    if (!ALLOWED_PRESETS.has(preset)) {
+      preset = "fast";
+    }
+
+    let crf = parseInt(req.query.crf);
+    if (isNaN(crf) || crf < 18 || crf > 32) {
+      crf = 23;
+    }
+
+    insertJob.run(jobId, width, height, fps, speed, preset, crf);
 
     res.status(201).json({ jobId, status: "queued" });
   } catch (err) {
@@ -62,20 +82,48 @@ router.post("/jobs", upload.single("file"), (req, res) => {
   }
 });
 
+// Parse SQLite 'YYYY-MM-DD HH:MM:SS' (UTC) → epoch ms
+function sqliteTsToMs(ts) {
+  if (!ts) return null;
+  // Treat the stored timestamp as UTC
+  const iso = ts.includes("T") ? ts : ts.replace(" ", "T") + "Z";
+  const n = new Date(iso).getTime();
+  return isNaN(n) ? null : n;
+}
+
 // GET /api/jobs/:id — Job status
 router.get("/jobs/:id", (req, res) => {
   const job = getJob.get(req.params.id);
   if (!job) {
     return res.status(404).json({ error: "Job not found" });
   }
+
+  // Processing time = completed_at - started_at (if both set),
+  // else current time - started_at (while still running).
+  let processingTimeMs = null;
+  const startedMs = sqliteTsToMs(job.startedAt);
+  const completedMs = sqliteTsToMs(job.completedAt);
+  if (startedMs) {
+    processingTimeMs = (completedMs || Date.now()) - startedMs;
+  }
+
   res.json({
     jobId: job.id,
     status: job.status,
     progress: job.progress,
+    width: job.width,
+    height: job.height,
+    fps: job.fps,
+    speed: job.speed,
+    preset: job.preset,
+    crf: job.crf,
     createdAt: job.createdAt,
+    startedAt: job.startedAt,
     completedAt: job.completedAt,
+    videoDurationMs: job.videoDurationMs,
+    processingTimeMs,
     error: job.error,
-    fileSize: job.file_size,
+    fileSize: job.fileSize,
   });
 });
 
