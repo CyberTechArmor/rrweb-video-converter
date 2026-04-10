@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=__WIDTH__, initial-scale=1.0" />
   <title>rrweb Replay</title>
+  <link rel="stylesheet" href="__RRWEB_CSS_URL__" />
   <style>
     * {
       margin: 0;
@@ -22,9 +23,6 @@
       position: relative;
       overflow: hidden;
     }
-    #player-container .replayer-wrapper {
-      transform-origin: top left;
-    }
     .replay-done {
       position: fixed;
       top: 0;
@@ -34,26 +32,27 @@
       opacity: 0;
       pointer-events: none;
     }
-    /* __RRWEB_CSS__ */
   </style>
 </head>
 <body>
   <div id="player-container"></div>
   <div id="done-marker"></div>
 
-  <script>
-    // __RRWEB_JS__
-  </script>
+  <script src="__RRWEB_JS_URL__"></script>
   <script>
     (function () {
       const events = __EVENTS_PLACEHOLDER__;
       const speed = __SPEED__;
-      const targetWidth = __WIDTH__;
-      const targetHeight = __HEIGHT__;
 
       window.__REPLAY_READY__ = false;
       window.__REPLAY_DONE__ = false;
       window.__REPLAY_ERROR__ = null;
+      window.__REPLAY_LOG__ = [];
+
+      function log(msg) {
+        window.__REPLAY_LOG__.push(msg);
+        console.log("[replay] " + msg);
+      }
 
       function setDoneMarker(text) {
         const marker = document.getElementById("done-marker");
@@ -62,9 +61,19 @@
       }
 
       try {
-        if (typeof rrweb === "undefined" || !rrweb.Replayer) {
-          throw new Error("rrweb library did not load");
+        log("script start");
+        if (typeof rrweb === "undefined") {
+          throw new Error("rrweb global is undefined (UMD bundle did not load)");
         }
+        if (!rrweb.Replayer) {
+          throw new Error(
+            "rrweb.Replayer is undefined (available keys: " +
+              Object.keys(rrweb).join(", ") +
+              ")"
+          );
+        }
+        log("rrweb loaded, keys: " + Object.keys(rrweb).join(","));
+        log("events count: " + (events && events.length));
 
         const replayer = new rrweb.Replayer(events, {
           root: document.getElementById("player-container"),
@@ -81,29 +90,20 @@
           UNSAFE_replayCanvas: true,
         });
 
-        // Scale the replay content to fill the target viewport
-        // Meta gives us the original recorded resolution
-        try {
-          const meta = replayer.getMetaData();
-          const origWidth = meta.totalTime ? (replayer.iframe && replayer.iframe.offsetWidth) : 0;
-          // Leave default scaling; rrweb sizes the iframe to the recorded document
-        } catch (e) {
-          // ignore
-        }
-
         replayer.on("finish", function () {
+          log("replay finish event");
           window.__REPLAY_DONE__ = true;
           setDoneMarker("done");
-          console.log("Replay finished");
         });
 
-        // Start playback
         replayer.play(0);
         window.__REPLAY_READY__ = true;
-        console.log("Replayer initialized, playing " + events.length + " events at " + speed + "x");
+        log("replayer ready and playing");
       } catch (err) {
+        const msg = (err && err.message) || String(err);
+        log("ERROR: " + msg);
         console.error("rrweb init failed:", err);
-        window.__REPLAY_ERROR__ = err.message || String(err);
+        window.__REPLAY_ERROR__ = msg;
         setDoneMarker("error");
       }
     })();

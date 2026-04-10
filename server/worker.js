@@ -17,8 +17,36 @@ const REPLAY_HTML_PATH = path.join(__dirname, "replay.html");
 const POLL_INTERVAL = 2000; // 2 seconds
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
 
-// ── Locate and cache rrweb assets at startup ──────────────────────
-function resolveRrwebAssets() {
+// ── Locate rrweb UMD assets and copy them to a shared location ────
+// We copy them to jobs/.assets/ and reference via absolute file:// URLs
+// instead of inlining into the HTML, because:
+//   1) rrweb bundles can contain literal "</script>" strings that
+//      prematurely close the enclosing <script> tag when inlined.
+//   2) Some rrweb versions ship ESM as .js, which fails silently in
+//      a classic <script> tag.
+// Loading via <script src> sidesteps both issues and avoids any
+// HTML-escaping concerns.
+function isUmdBundle(content) {
+  // Reject ES modules — top-level import/export statements throw
+  // SyntaxError in a classic <script> tag. Anything else (UMD, IIFE,
+  // plain script) is fine to load via a <script src> tag.
+  const head = content.slice(0, 8192);
+  const lines = head.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*")) {
+      continue;
+    }
+    if (/^(import|export)[\s{(*]/.test(trimmed)) {
+      return false;
+    }
+    // Only inspect first few non-comment lines
+    break;
+  }
+  return true;
+}
+
+function resolveRrwebAssetPaths() {
   const root = path.join(__dirname, "..");
   const rrwebDist = path.join(root, "node_modules", "rrweb", "dist");
 
@@ -28,29 +56,37 @@ function resolveRrwebAssets() {
     );
   }
 
-  // Prefer an IIFE/UMD build (has a global). rrweb ships:
-  //   dist/rrweb.js        — UMD with global `rrweb`
-  //   dist/rrweb.min.js    — minified UMD
-  //   dist/rrweb.umd.cjs   — newer versions
+  const allFiles = fs.readdirSync(rrwebDist);
+  console.log(`rrweb dist contents: ${allFiles.join(", ")}`);
+
+  // Preferred UMD filenames in order
   const jsCandidates = [
     "rrweb.min.js",
     "rrweb.js",
-    "rrweb.umd.cjs",
-    "index.umd.js",
+    "rrweb-all.min.js",
     "rrweb-all.js",
+    "rrweb.umd.cjs",
+    "rrweb.umd.js",
   ];
-  const cssCandidates = ["rrweb.css", "style.css", "rrweb.min.css"];
+  const cssCandidates = ["rrweb.min.css", "rrweb.css", "style.css"];
 
   let jsPath = null;
-  let cssPath = null;
-
   for (const name of jsCandidates) {
     const p = path.join(rrwebDist, name);
     if (fs.existsSync(p)) {
-      jsPath = p;
-      break;
+      const content = fs.readFileSync(p, "utf-8");
+      if (isUmdBundle(content)) {
+        jsPath = p;
+        break;
+      } else {
+        console.warn(
+          `${name} exists but looks like an ES module, skipping`
+        );
+      }
     }
   }
+
+  let cssPath = null;
   for (const name of cssCandidates) {
     const p = path.join(rrwebDist, name);
     if (fs.existsSync(p)) {
@@ -59,58 +95,74 @@ function resolveRrwebAssets() {
     }
   }
 
-  // Fallback: scan the directory
-  if (!jsPath) {
-    const files = fs.readdirSync(rrwebDist);
-    const jsFile = files.find(
-      (f) =>
-        (f === "rrweb.js" ||
-          f === "rrweb.min.js" ||
-          f.endsWith(".umd.cjs") ||
-          f.endsWith(".umd.js")) &&
-        !f.includes("esm")
-    );
-    if (jsFile) jsPath = path.join(rrwebDist, jsFile);
-    const cssFile = files.find((f) => f.endsWith(".css"));
-    if (cssFile && !cssPath) cssPath = path.join(rrwebDist, cssFile);
-  }
-
   if (!jsPath) {
     throw new Error(
-      `Could not find rrweb UMD build in ${rrwebDist}. ` +
-        `Contents: ${fs.readdirSync(rrwebDist).join(", ")}`
+      `Could not find a UMD rrweb build in ${rrwebDist}.\n` +
+        `Contents: ${allFiles.join(", ")}\n` +
+        `Pin rrweb to ^1.1.3 in package.json — it ships dist/rrweb.min.js as a UMD build.`
     );
   }
 
-  console.log(`Using rrweb JS:  ${jsPath}`);
-  console.log(`Using rrweb CSS: ${cssPath || "(none found)"}`);
-
-  return {
-    js: fs.readFileSync(jsPath, "utf-8"),
-    css: cssPath ? fs.readFileSync(cssPath, "utf-8") : "",
-  };
+  return { jsPath, cssPath };
 }
 
-let RRWEB_ASSETS;
+// At startup: copy rrweb assets to jobs/.assets/ so they have a stable
+// path that we can reference via file:// URL from each job's replay.html.
+const ASSETS_DIR = path.join(JOBS_DIR, ".assets");
+let RRWEB_JS_URL = "";
+let RRWEB_CSS_URL = "";
+let RRWEB_AVAILABLE = false;
+
 try {
-  RRWEB_ASSETS = resolveRrwebAssets();
+  fs.mkdirSync(ASSETS_DIR, { recursive: true });
+  const { jsPath, cssPath } = resolveRrwebAssetPaths();
+
+  const sharedJs = path.join(ASSETS_DIR, "rrweb.js");
+  fs.copyFileSync(jsPath, sharedJs);
+  RRWEB_JS_URL = "file://" + sharedJs;
+  console.log(`rrweb JS:  ${jsPath} → ${sharedJs}`);
+
+  if (cssPath) {
+    const sharedCss = path.join(ASSETS_DIR, "rrweb.css");
+    fs.copyFileSync(cssPath, sharedCss);
+    RRWEB_CSS_URL = "file://" + sharedCss;
+    console.log(`rrweb CSS: ${cssPath} → ${sharedCss}`);
+  } else {
+    // Create an empty file so the <link> tag doesn't 404
+    const sharedCss = path.join(ASSETS_DIR, "rrweb.css");
+    fs.writeFileSync(sharedCss, "/* no rrweb css found */");
+    RRWEB_CSS_URL = "file://" + sharedCss;
+  }
+
+  RRWEB_AVAILABLE = true;
 } catch (err) {
-  console.error("[worker] Failed to load rrweb assets:", err.message);
-  // Don't exit — let jobs fail with a clear error message
-  RRWEB_ASSETS = { js: "", css: "" };
+  console.error("[worker] Failed to prepare rrweb assets:", err.message);
+  // Don't exit — let jobs fail with a clear error message instead
 }
 
 const REPLAY_HTML_TEMPLATE = fs.readFileSync(REPLAY_HTML_PATH, "utf-8");
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+// Serialize JS object for safe inlining inside a <script> tag.
+// Escapes sequences that could break out of the script context or
+// trip up the HTML parser: </script>, <!--, U+2028/U+2029.
+function htmlSafeJson(obj) {
+  return JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 function buildReplayHtml(events, job) {
-  // Use function form of String.prototype.replace to avoid issues where the
-  // rrweb JS/CSS content contains special replacement patterns (e.g. "$&")
-  // which String.replace would otherwise interpret.
+  // Use function form of .replace so '$' sequences in the replacement
+  // values aren't interpreted as back-references.
   return REPLAY_HTML_TEMPLATE
-    .replace(/\/\* __RRWEB_CSS__ \*\//, () => RRWEB_ASSETS.css)
-    .replace(/\/\/ __RRWEB_JS__/, () => RRWEB_ASSETS.js)
-    .replace("__EVENTS_PLACEHOLDER__", () => JSON.stringify(events))
+    .replace("__RRWEB_CSS_URL__", () => RRWEB_CSS_URL)
+    .replace("__RRWEB_JS_URL__", () => RRWEB_JS_URL)
+    .replace("__EVENTS_PLACEHOLDER__", () => htmlSafeJson(events))
     .replace(/__WIDTH__/g, String(job.width))
     .replace(/__HEIGHT__/g, String(job.height))
     .replace("__SPEED__", String(job.speed));
@@ -144,9 +196,9 @@ async function processJob(job) {
   console.log(`${logPrefix} Start (${job.width}x${job.height} @ ${job.fps}fps, speed ${job.speed}x)`);
   updateJobStatus.run("processing", 5, job.id);
 
-  if (!RRWEB_ASSETS.js) {
+  if (!RRWEB_AVAILABLE) {
     failJob.run(
-      "rrweb library not installed. Run `npm install` in the project root.",
+      "rrweb UMD bundle not available. Pin rrweb to ^1.1.3 and run `npm install`.",
       job.id
     );
     return;
@@ -181,6 +233,8 @@ async function processJob(job) {
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
+        "--disable-web-security",
+        "--allow-file-access-from-files",
         "--hide-scrollbars",
         "--mute-audio",
         `--window-size=${job.width},${job.height}`,
@@ -219,14 +273,31 @@ async function processJob(job) {
     });
     console.log(`${logPrefix} Replay page loaded`);
 
-    // Wait for rrweb to have initialized
+    // Wait for rrweb to have initialized (or error out)
     try {
       await page.waitForFunction(
         "window.__REPLAY_READY__ === true || window.__REPLAY_ERROR__",
-        { timeout: 30000 }
+        { timeout: 30000, polling: 200 }
       );
     } catch {
-      throw new Error("rrweb Replayer failed to initialize within 30 seconds");
+      // Collect diagnostic info from the page
+      const diag = await page.evaluate(() => ({
+        ready: window.__REPLAY_READY__,
+        error: window.__REPLAY_ERROR__,
+        logs: window.__REPLAY_LOG__ || [],
+        rrwebType: typeof window.rrweb,
+        rrwebKeys:
+          typeof window.rrweb === "object" && window.rrweb
+            ? Object.keys(window.rrweb)
+            : null,
+        bodyHtmlLen: document.body ? document.body.innerHTML.length : 0,
+      })).catch((e) => ({ evalError: e.message }));
+      console.error(`${logPrefix} init diagnostics:`, JSON.stringify(diag));
+      throw new Error(
+        `rrweb Replayer failed to initialize within 30 seconds — ${JSON.stringify(
+          diag
+        )}`
+      );
     }
 
     const replayError = await page.evaluate(
