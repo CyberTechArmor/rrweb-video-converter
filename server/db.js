@@ -19,7 +19,7 @@ db.exec(`
     fps INTEGER NOT NULL DEFAULT 15,
     speed REAL NOT NULL DEFAULT 1,
     preset TEXT NOT NULL DEFAULT 'fast',
-    crf INTEGER NOT NULL DEFAULT 23,
+    crf INTEGER NOT NULL DEFAULT 26,
     error TEXT,
     file_size INTEGER,
     video_duration_ms INTEGER,
@@ -43,7 +43,7 @@ function addColumnIfMissing(name, def) {
   }
 }
 addColumnIfMissing("preset", "TEXT NOT NULL DEFAULT 'fast'");
-addColumnIfMissing("crf", "INTEGER NOT NULL DEFAULT 23");
+addColumnIfMissing("crf", "INTEGER NOT NULL DEFAULT 26");
 addColumnIfMissing("video_duration_ms", "INTEGER");
 addColumnIfMissing("started_at", "TEXT");
 

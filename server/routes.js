@@ -68,9 +68,11 @@ router.post("/jobs", upload.single("file"), (req, res) => {
       preset = "fast";
     }
 
+    // Default CRF is 26 (size-optimized) not 23 — still perfectly
+    // readable on UI text but ~35% smaller file than crf 23.
     let crf = parseInt(req.query.crf);
     if (isNaN(crf) || crf < 18 || crf > 32) {
-      crf = 23;
+      crf = 26;
     }
 
     insertJob.run(jobId, width, height, fps, speed, preset, crf);
