@@ -1,3 +1,4 @@
+require("./env");
 const path = require("path");
 const fs = require("fs");
 const puppeteer = require("puppeteer");
@@ -48,7 +49,7 @@ async function processJob(job) {
     updateJobStatus.run("processing", 20, job.id);
 
     // Launch headless Chromium
-    browser = await puppeteer.launch({
+    const launchOptions = {
       headless: "new",
       args: [
         "--no-sandbox",
@@ -57,7 +58,11 @@ async function processJob(job) {
         "--disable-gpu",
         `--window-size=${job.width},${job.height}`,
       ],
-    });
+    };
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     await page.setViewport({ width: job.width, height: job.height });

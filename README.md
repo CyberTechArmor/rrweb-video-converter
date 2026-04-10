@@ -92,6 +92,41 @@ This starts the API server, background worker, and Vite dev server concurrently.
 - SQLite database for job tracking (no external dependencies)
 - All job files stored in `jobs/{jobId}/` directory
 
+## Troubleshooting
+
+### `libnss3.so: cannot open shared object file`
+
+Puppeteer's downloaded Chromium needs several shared libraries to run on Linux. The `install.sh` script installs them automatically via `apt`/`dnf`/`pacman`. If you see this error, run:
+
+```bash
+./install.sh
+```
+
+...again as root or with `sudo`, or install the packages manually:
+
+**Debian/Ubuntu:**
+```bash
+sudo apt-get install -y libnss3 libatk-bridge2.0-0 libatk1.0-0 libcups2 \
+  libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 libxcomposite1 \
+  libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 libasound2 libpango-1.0-0
+```
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install -y nss atk at-spi2-atk gtk3 cups-libs libXcomposite \
+  libXdamage libXrandr libXScrnSaver libXtst alsa-lib pango
+```
+
+Alternatively, point Puppeteer at a system-installed Chrome/Chromium by setting `PUPPETEER_EXECUTABLE_PATH` in `.env`:
+
+```bash
+echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> .env
+```
+
+### Running as root
+
+If running the service as root (e.g., inside a minimal container), Chromium refuses to start without `--no-sandbox`. The worker already passes this flag.
+
 ## Tech Stack
 
 - **API**: Express, multer, better-sqlite3, uuid
